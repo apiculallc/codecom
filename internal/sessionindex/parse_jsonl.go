@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const maxJSONLLineBytes = 16 * 1024 * 1024
+
 type envelope struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
@@ -41,6 +43,7 @@ func parseSessionFile(path string) (SessionRecord, []Warning, error) {
 	warnings := make([]Warning, 0)
 
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLLineBytes)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++

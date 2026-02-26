@@ -3,6 +3,7 @@ package sessionindex
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +59,29 @@ func TestParseSessionFileFallsBackSessionIDFromFilename(t *testing.T) {
 	}
 	if rec.SessionID != "rollout-abc" {
 		t.Fatalf("unexpected fallback session id: %q", rec.SessionID)
+	}
+}
+
+func TestParseSessionFileHandlesLargeLines(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "large.jsonl")
+	longCWD := "/tmp/" + strings.Repeat("a", 70*1024)
+	line := "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"" + longCWD + "\",\"session_id\":\"sid-large\"}}\n"
+	if err := os.WriteFile(f, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, warnings, err := parseSessionFile(f)
+	if err != nil {
+		t.Fatalf("parseSessionFile returned error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %d", len(warnings))
+	}
+	if rec.SessionID != "sid-large" {
+		t.Fatalf("unexpected session id: %q", rec.SessionID)
+	}
+	if rec.SessionMetaCWD != longCWD {
+		t.Fatalf("unexpected cwd length: got %d want %d", len(rec.SessionMetaCWD), len(longCWD))
 	}
 }
