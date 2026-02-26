@@ -4,8 +4,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-isatty"
 
 	"codecom/internal/config"
+	"codecom/internal/sessionindex"
+	"codecom/internal/tui"
 )
 
 func RunTUI(args []string, stdout, stderr io.Writer) error {
@@ -25,6 +31,31 @@ func RunTUI(args []string, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stderr, "codecom %s\n", Version)
-	fmt.Fprintln(stderr, "tui mode is not implemented yet")
-	return nil
+
+	res, err := sessionindex.Scan(resolved)
+	if err != nil {
+		return err
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(stderr, "warning: %s:%d: %s\n", w.SessionFile, w.Line, w.Message)
+	}
+
+	m := tui.NewModel(res.Sessions)
+	if !isTerminalWriter(stdout) {
+		_, err := io.WriteString(stdout, m.View())
+		return err
+	}
+
+	p := tea.NewProgram(m, tea.WithInput(os.Stdin), tea.WithOutput(stdout))
+	_, err = p.Run()
+	return err
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	type fdWriter interface{ Fd() uintptr }
+	fw, ok := w.(fdWriter)
+	if !ok {
+		return false
+	}
+	return isatty.IsTerminal(fw.Fd()) || isatty.IsCygwinTerminal(fw.Fd())
 }
