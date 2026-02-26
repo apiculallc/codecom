@@ -10,9 +10,11 @@ const Version = "dev"
 
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintf(stderr, "codecom %s\n", Version)
-		fmt.Fprintln(stderr, "tui mode is not implemented yet")
-		return 1
+		if err := RunTUI(nil, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "tui error: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 
 	switch args[0] {
@@ -23,9 +25,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "tui":
-		fmt.Fprintf(stderr, "codecom %s\n", Version)
-		fmt.Fprintln(stderr, "tui mode is not implemented yet")
-		return 1
+		if err := RunTUI(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "tui error: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		return 1

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"codecom/internal/config"
 	"codecom/internal/output"
 	"codecom/internal/sessionindex"
 )
@@ -32,6 +33,9 @@ func RunScan(args []string, stdout, stderr io.Writer) error {
 
 	resolved, err := expandHome(*codexDir)
 	if err != nil {
+		return err
+	}
+	if _, err := config.Load(resolved); err != nil {
 		return err
 	}
 

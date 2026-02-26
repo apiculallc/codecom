@@ -73,3 +73,23 @@ func TestRunScanRequiresExactlyOneMode(t *testing.T) {
 		t.Fatal("expected error for two modes")
 	}
 }
+
+func TestRunScanDoesNotCreateConfigFile(t *testing.T) {
+	root := t.TempDir()
+	f := filepath.Join(root, "sessions", "2026", "02", "26", "a.jsonl")
+	if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f, []byte("{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/proj\",\"session_id\":\"sid-2\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if err := RunScan([]string{"--json", "--codex-dir", root}, &out, &errOut); err != nil {
+		t.Fatalf("RunScan returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "codecom.toml")); !os.IsNotExist(err) {
+		t.Fatalf("scan should not write config file, got stat err=%v", err)
+	}
+}
