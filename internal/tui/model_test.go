@@ -36,7 +36,7 @@ func TestSessionsForCurrentSourceFiltersToSourceFolder(t *testing.T) {
 func TestViewContainsPaneHeadersAndKeys(t *testing.T) {
 	m := NewModel(nil)
 	view := m.View()
-	for _, expected := range []string{"Source", "Target", "Sessions", "F5 refresh", "F6 move", "Status:"} {
+	for _, expected := range []string{"Source", "Target", "Sessions", "F5", "refresh", "F6", "move", "Status:"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("view missing %q: %q", expected, view)
 		}
@@ -114,5 +114,65 @@ func TestTabMovesToSessionPaneAndScrollsIndependently(t *testing.T) {
 	}
 	if mm.sessionPane.cursor == 0 {
 		t.Fatal("expected session pane cursor to move")
+	}
+}
+
+func TestSpaceTogglesCurrentSessionSelection(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "a", SessionFile: "/tmp/a.jsonl", SessionMetaCWD: "/repo/src"},
+		{SessionID: "b", SessionFile: "/tmp/b.jsonl", SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModel(records)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm = updated.(Model)
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeySpace})
+	mm = updated.(Model)
+	if mm.SelectedCount() != 1 {
+		t.Fatalf("expected 1 selected session, got %d", mm.SelectedCount())
+	}
+	if _, ok := mm.selected["/tmp/a.jsonl"]; !ok {
+		t.Fatal("expected current session to be selected")
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeySpace})
+	mm = updated.(Model)
+	if mm.SelectedCount() != 0 {
+		t.Fatalf("expected selection to toggle off, got %d", mm.SelectedCount())
+	}
+}
+
+func TestSelectAllOnlySelectsCurrentSourceSessions(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "a", SessionFile: "/tmp/a.jsonl", SessionMetaCWD: "/repo/other"},
+		{SessionID: "b", SessionFile: "/tmp/b.jsonl", SessionMetaCWD: "/repo/src"},
+		{SessionID: "c", SessionFile: "/tmp/c.jsonl", SessionMetaCWD: "/repo/src/sub"},
+	}
+	m := NewModel(records)
+	m.sourcePane.cursor = 1
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	mm := updated.(Model)
+	if mm.SelectedCount() != 2 {
+		t.Fatalf("expected 2 selected sessions, got %d", mm.SelectedCount())
+	}
+	if _, ok := mm.selected["/tmp/a.jsonl"]; ok {
+		t.Fatal("expected select-all to ignore sessions outside current source")
+	}
+}
+
+func TestViewMarksSelectedSessions(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "a", SessionFile: "/tmp/a.jsonl", SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModel(records)
+	m.selected["/tmp/a.jsonl"] = struct{}{}
+	view := m.View()
+	if !strings.Contains(view, "[*] a") {
+		t.Fatalf("expected selected marker in view, got %q", view)
+	}
+	if !strings.Contains(view, "Selected: 1") {
+		t.Fatalf("expected selected count in status, got %q", view)
 	}
 }

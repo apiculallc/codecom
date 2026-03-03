@@ -31,6 +31,7 @@ type Model struct {
 	targetFolders []string
 	sessions      []sessionindex.SessionRecord
 	folderCounts  map[string]int
+	selected      map[string]struct{}
 
 	sourcePane  paneState
 	targetPane  paneState
@@ -68,6 +69,7 @@ func NewModel(records []sessionindex.SessionRecord) Model {
 		targetFolders: targets,
 		sessions:      records,
 		folderCounts:  folderCounts,
+		selected:      make(map[string]struct{}),
 		activePanel:   panelSource,
 		status:        "ready",
 		width:         defaultWidth,
@@ -108,10 +110,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "refresh requested"
 		case "f6":
 			m.status = "move requested (not implemented)"
-		case "space":
-			m.status = "selection toggle requested"
+		case "space", " ":
+			m.toggleCurrentSessionSelection()
 		case "a":
-			m.status = "select-all requested"
+			m.selectAllCurrentSourceSessions()
 		case "u":
 			m.status = "undo requested"
 		case "y":
@@ -159,8 +161,9 @@ func (m Model) View() string {
 	right := m.renderPathPane("Target", m.targetFolders, m.folderCounts, m.targetPane, rightW, topH, m.activePanel == panelTarget)
 	top := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	bottom := m.renderSessionsPane(colW+rightW, bottomH, m.activePanel == panelSessions)
-	status := m.styles.statusBar.Render(padRight(truncateRight("Status: "+m.status, colW+rightW), colW+rightW))
-	keys := m.styles.keyBar.Render(padRight(truncateRight(strings.Join(KeyHints, "  "), colW+rightW), colW+rightW))
+	statusText := fmt.Sprintf("Status: %s | Selected: %d", m.status, m.SelectedCount())
+	status := m.styles.statusBar.Render(padRight(truncateRight(statusText, colW+rightW), colW+rightW))
+	keys := m.renderKeyBar(colW + rightW)
 
 	return lipgloss.JoinVertical(lipgloss.Left, top, bottom, status, keys)
 }
@@ -289,21 +292,27 @@ func (m Model) renderPathPane(title string, paths []string, counts map[string]in
 		}
 		lines = append(lines, label)
 	}
-	return m.renderPane(title, width, height, lines, pane, active, nil)
+	return m.renderPane(title, width, height, lines, pane, active, nil, nil)
 }
 
 func (m Model) renderSessionsPane(width, height int, active bool) string {
 	rows := m.SessionsForCurrentSource()
 	lines := make([]string, 0, len(rows))
 	orphan := make(map[int]bool, len(rows))
+	selected := make(map[int]bool, len(rows))
 	for i, r := range rows {
-		lines = append(lines, fmt.Sprintf("%s  %s", r.SessionID, r.EffectiveCWD()))
+		marker := " "
+		if m.isSelected(r) {
+			marker = "*"
+			selected[i] = true
+		}
+		lines = append(lines, fmt.Sprintf("[%s] %s  %s", marker, r.SessionID, r.EffectiveCWD()))
 		orphan[i] = r.Orphan
 	}
-	return m.renderPane("Sessions", width, height, lines, m.sessionPane, active, orphan)
+	return m.renderPane("Sessions", width, height, lines, m.sessionPane, active, orphan, selected)
 }
 
-func (m Model) renderPane(title string, width, height int, lines []string, pane paneState, active bool, orphan map[int]bool) string {
+func (m Model) renderPane(title string, width, height int, lines []string, pane paneState, active bool, orphan map[int]bool, selected map[int]bool) string {
 	frame := m.styles.inactivePane
 	titleStyle := m.styles.inactiveTitle
 	if active {
@@ -325,6 +334,9 @@ func (m Model) renderPane(title string, width, height int, lines []string, pane 
 		idx := pane.offset + i
 		line := visible[i]
 		style := m.styles.row
+		if selected != nil && selected[idx] {
+			style = m.styles.markedRow
+		}
 		if orphan != nil && orphan[idx] {
 			style = m.styles.orphanRow
 		}
@@ -429,6 +441,81 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-len(r))
 }
 
+func padVisibleRight(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	visible := lipgloss.Width(s)
+	if visible >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-visible)
+}
+
+func (m Model) renderKeyBar(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	segments := make([]string, 0, len(KeyHints))
+	for _, hint := range KeyHints {
+		segment := m.styles.keyCap.Render(hint.Key) + m.styles.keyLabel.Render(hint.Label)
+		segments = append(segments, segment)
+	}
+	line := ""
+	for _, segment := range segments {
+		next := segment
+		if line != "" {
+			next = line + " " + segment
+		}
+		if lipgloss.Width(next) > width {
+			break
+		}
+		line = next
+	}
+	return m.styles.keyBar.Render(padVisibleRight(line, width))
+}
+
+func (m Model) SelectedCount() int {
+	return len(m.selected)
+}
+
+func (m Model) isSelected(r sessionindex.SessionRecord) bool {
+	_, ok := m.selected[r.SessionFile]
+	return ok
+}
+
+func (m *Model) toggleCurrentSessionSelection() {
+	if m.activePanel != panelSessions {
+		m.status = "selection only works in sessions pane"
+		return
+	}
+	rows := m.SessionsForCurrentSource()
+	if len(rows) == 0 || m.sessionPane.cursor < 0 || m.sessionPane.cursor >= len(rows) {
+		m.status = "no session to select"
+		return
+	}
+	row := rows[m.sessionPane.cursor]
+	if _, ok := m.selected[row.SessionFile]; ok {
+		delete(m.selected, row.SessionFile)
+		m.status = "session unselected"
+		return
+	}
+	m.selected[row.SessionFile] = struct{}{}
+	m.status = "session selected"
+}
+
+func (m *Model) selectAllCurrentSourceSessions() {
+	rows := m.SessionsForCurrentSource()
+	if len(rows) == 0 {
+		m.status = "no sessions in current source"
+		return
+	}
+	for _, row := range rows {
+		m.selected[row.SessionFile] = struct{}{}
+	}
+	m.status = fmt.Sprintf("selected %d session(s) in current source", len(rows))
+}
+
 func maxInt(a, b int) int {
 	if a > b {
 		return a
@@ -454,11 +541,14 @@ type styles struct {
 	activeTitle      lipgloss.Style
 	inactiveTitle    lipgloss.Style
 	row              lipgloss.Style
+	markedRow        lipgloss.Style
 	orphanRow        lipgloss.Style
 	selectedActive   lipgloss.Style
 	selectedInactive lipgloss.Style
 	statusBar        lipgloss.Style
 	keyBar           lipgloss.Style
+	keyCap           lipgloss.Style
+	keyLabel         lipgloss.Style
 }
 
 func newStyles() styles {
@@ -486,10 +576,13 @@ func newStyles() styles {
 		activeTitle:      lipgloss.NewStyle().Background(p.accent).Foreground(p.selectFG).Bold(true),
 		inactiveTitle:    lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Bold(true),
 		row:              lipgloss.NewStyle().Background(p.paneBG).Foreground(p.text),
+		markedRow:        lipgloss.NewStyle().Background(p.paneBG).Foreground(p.accent).Bold(true),
 		orphanRow:        lipgloss.NewStyle().Background(p.paneBG).Foreground(p.orphan),
 		selectedActive:   lipgloss.NewStyle().Background(p.selectBG).Foreground(p.selectFG).Bold(true),
 		selectedInactive: lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Bold(true),
 		statusBar:        lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text),
 		keyBar:           lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text),
+		keyCap:           lipgloss.NewStyle().Background(p.text).Foreground(p.selectFG).Bold(true).Padding(0, 1),
+		keyLabel:         lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Padding(0, 1),
 	}
 }
