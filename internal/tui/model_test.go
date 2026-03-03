@@ -93,7 +93,7 @@ func TestSourcePaneScrolls(t *testing.T) {
 	}
 }
 
-func TestTabMovesToSessionPaneAndScrollsIndependently(t *testing.T) {
+func TestTabCyclesSourceSessionsTargetAndScrollsIndependently(t *testing.T) {
 	records := make([]sessionindex.SessionRecord, 0, 12)
 	for i := 0; i < 12; i++ {
 		records = append(records, sessionindex.SessionRecord{SessionID: string(rune('a' + i)), SessionMetaCWD: "/repo/src/sub"})
@@ -101,8 +101,6 @@ func TestTabMovesToSessionPaneAndScrollsIndependently(t *testing.T) {
 	m := NewModel(records)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 18})
 	mm := updated.(Model)
-	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyTab})
-	mm = updated.(Model)
 	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyTab})
 	mm = updated.(Model)
 	if mm.activePanel != panelSessions {
@@ -115,6 +113,16 @@ func TestTabMovesToSessionPaneAndScrollsIndependently(t *testing.T) {
 	if mm.sessionPane.cursor == 0 {
 		t.Fatal("expected session pane cursor to move")
 	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm = updated.(Model)
+	if mm.activePanel != panelTarget {
+		t.Fatalf("expected target panel active after second tab, got %d", mm.activePanel)
+	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	mm = updated.(Model)
+	if mm.activePanel != panelSessions {
+		t.Fatalf("expected shift+tab to return to sessions, got %d", mm.activePanel)
+	}
 }
 
 func TestSpaceTogglesCurrentSessionSelection(t *testing.T) {
@@ -125,8 +133,6 @@ func TestSpaceTogglesCurrentSessionSelection(t *testing.T) {
 	m := NewModel(records)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	mm := updated.(Model)
-	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyTab})
-	mm = updated.(Model)
 
 	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeySpace})
 	mm = updated.(Model)
@@ -141,6 +147,30 @@ func TestSpaceTogglesCurrentSessionSelection(t *testing.T) {
 	mm = updated.(Model)
 	if mm.SelectedCount() != 0 {
 		t.Fatalf("expected selection to toggle off, got %d", mm.SelectedCount())
+	}
+}
+
+func TestLeftRightJumpBetweenSourceAndTarget(t *testing.T) {
+	m := NewModel([]sessionindex.SessionRecord{{SessionID: "a", SessionMetaCWD: "/repo/src"}})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	mm := updated.(Model)
+	if mm.activePanel != panelTarget {
+		t.Fatalf("expected right to jump to target, got %d", mm.activePanel)
+	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	mm = updated.(Model)
+	if mm.activePanel != panelSource {
+		t.Fatalf("expected left to jump to source, got %d", mm.activePanel)
+	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm = updated.(Model)
+	if mm.activePanel != panelSessions {
+		t.Fatalf("expected tab to move to sessions, got %d", mm.activePanel)
+	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRight})
+	mm = updated.(Model)
+	if mm.activePanel != panelTarget {
+		t.Fatalf("expected right from sessions to jump to target, got %d", mm.activePanel)
 	}
 }
 

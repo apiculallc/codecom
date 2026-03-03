@@ -91,9 +91,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "tab":
-			m.activePanel = (m.activePanel + 1) % 3
+			m.activePanel = nextPanel(m.activePanel)
 		case "shift+tab":
-			m.activePanel = (m.activePanel + 2) % 3
+			m.activePanel = prevPanel(m.activePanel)
+		case "left":
+			m.activePanel = panelSource
+		case "right":
+			m.activePanel = panelTarget
 		case "up":
 			m.moveCursor(-1)
 		case "down":
@@ -521,6 +525,28 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func nextPanel(current int) int {
+	switch current {
+	case panelSource:
+		return panelSessions
+	case panelSessions:
+		return panelTarget
+	default:
+		return panelSource
+	}
+}
+
+func prevPanel(current int) int {
+	switch current {
+	case panelSource:
+		return panelTarget
+	case panelTarget:
+		return panelSessions
+	default:
+		return panelSource
+	}
 }
 
 type palette struct {
