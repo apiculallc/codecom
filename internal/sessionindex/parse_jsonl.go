@@ -7,13 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const maxJSONLLineBytes = 16 * 1024 * 1024
 
 type envelope struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Timestamp string          `json:"timestamp"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 type sessionMetaPayload struct {
@@ -23,11 +25,14 @@ type sessionMetaPayload struct {
 }
 
 type turnContextPayload struct {
-	CWD string `json:"cwd"`
+	CWD    string `json:"cwd"`
+	Model  string `json:"model"`
+	Policy string `json:"approval_policy"`
 }
 
-type tokenPayload struct {
+type eventMsgPayload struct {
 	Type            string `json:"type"`
+	Message         string `json:"message"`
 	TotalTokenUsage *int64 `json:"total_token_usage"`
 	LastTokenUsage  *int64 `json:"last_token_usage"`
 }
@@ -57,6 +62,9 @@ func parseSessionFile(path string) (SessionRecord, []Warning, error) {
 			warnings = append(warnings, Warning{SessionFile: path, Line: lineNo, Message: fmt.Sprintf("malformed json line: %v", err)})
 			continue
 		}
+		if ts, err := time.Parse(time.RFC3339Nano, env.Timestamp); err == nil && ts.After(rec.LastActivity) {
+			rec.LastActivity = ts
+		}
 
 		switch env.Type {
 		case "session_meta":
@@ -78,15 +86,27 @@ func parseSessionFile(path string) (SessionRecord, []Warning, error) {
 			if p.CWD != "" {
 				rec.TurnContextCWD = append(rec.TurnContextCWD, p.CWD)
 			}
+			if p.Model != "" {
+				rec.Model = p.Model
+			}
 		case "event_msg":
-			var p tokenPayload
+			var p eventMsgPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				warnings = append(warnings, Warning{SessionFile: path, Line: lineNo, Message: fmt.Sprintf("bad event_msg payload: %v", err)})
 				continue
 			}
-			if p.Type == "token_count" {
+			switch p.Type {
+			case "token_count":
 				rec.TotalTokens = p.TotalTokenUsage
 				rec.LastTokens = p.LastTokenUsage
+			case "user_message":
+				rec.UserMessageCount++
+				if rec.FirstUserMessage == "" {
+					rec.FirstUserMessage = p.Message
+				}
+				rec.LastUserMessage = p.Message
+			case "turn_aborted":
+				rec.Aborted = true
 			}
 		}
 	}
