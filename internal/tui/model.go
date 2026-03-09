@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,18 +32,23 @@ type Model struct {
 	sessions    []sessionindex.SessionRecord
 	selected    map[string]struct{}
 
-	targetRoot     string
+	sourceViewRoot string
+	targetBaseRoot string
+	targetViewRoot string
 	targetExpanded map[string]struct{}
 	knownCounts    map[string]int
 
-	sourcePane  paneState
-	targetPane  paneState
-	sessionPane paneState
-	activePanel int
-	status      string
-	width       int
-	height      int
-	styles      styles
+	sourcePane   paneState
+	targetPane   paneState
+	sessionPane  paneState
+	activePanel  int
+	filterMode   bool
+	sourceFilter string
+	targetFilter string
+	status       string
+	width        int
+	height       int
+	styles       styles
 }
 
 func NewModel(records []sessionindex.SessionRecord) Model {
@@ -66,7 +72,8 @@ func NewModelWithTargetRoot(records []sessionindex.SessionRecord, targetRoot str
 		targetNodes:    targetNodes,
 		sessions:       records,
 		selected:       make(map[string]struct{}),
-		targetRoot:     filepath.Clean(targetRoot),
+		targetBaseRoot: filepath.Clean(targetRoot),
+		targetViewRoot: filepath.Clean(targetRoot),
 		targetExpanded: expanded,
 		knownCounts:    knownCounts,
 		activePanel:    panelSource,
@@ -86,9 +93,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.clampAll()
 	case tea.KeyMsg:
+		if m.filterMode {
+			return m.updateFilter(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
+		case "/":
+			m.enterFilterMode()
 		case "tab":
 			m.activePanel = nextPanel(m.activePanel)
 		case "shift+tab":
@@ -109,6 +121,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jumpCursor(0)
 		case "end":
 			m.jumpCursor(m.activeLen() - 1)
+		case "enter":
+			m.enterCurrentNode()
 		case "f5":
 			m.status = "refresh requested"
 		case "f6":
@@ -152,25 +166,27 @@ func (m *Model) handleRight() {
 }
 
 func (m Model) CurrentSourceFolder() string {
-	if len(m.sourceNodes) == 0 {
+	nodes := m.visibleSourceNodes()
+	if len(nodes) == 0 {
 		return ""
 	}
 	idx := m.sourcePane.cursor
-	if idx < 0 || idx >= len(m.sourceNodes) {
+	if idx < 0 || idx >= len(nodes) {
 		return ""
 	}
-	return m.sourceNodes[idx].Path
+	return nodes[idx].Path
 }
 
 func (m Model) CurrentTargetFolder() string {
-	if len(m.targetNodes) == 0 {
+	nodes := m.visibleTargetNodes()
+	if len(nodes) == 0 {
 		return ""
 	}
 	idx := m.targetPane.cursor
-	if idx < 0 || idx >= len(m.targetNodes) {
+	if idx < 0 || idx >= len(nodes) {
 		return ""
 	}
-	return m.targetNodes[idx].Path
+	return nodes[idx].Path
 }
 
 func (m Model) SessionsForCurrentSource() []sessionindex.SessionRecord {
@@ -196,11 +212,14 @@ func (m Model) View() string {
 	colW := max(10, (w-1)/2)
 	rightW := max(10, w-colW-1)
 
-	left := m.renderTreePane("Source", m.sourceNodes, m.sourcePane, colW, topH, m.activePanel == panelSource, true)
-	right := m.renderTreePane("Target", m.targetNodes, m.targetPane, rightW, topH, m.activePanel == panelTarget, false)
+	left := m.renderTreePane("Source", m.visibleSourceNodes(), m.sourcePane, colW, topH, m.activePanel == panelSource, true)
+	right := m.renderTreePane("Target", m.visibleTargetNodes(), m.targetPane, rightW, topH, m.activePanel == panelTarget, false)
 	top := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	bottom := m.renderSessionsPane(colW+rightW, bottomH, m.activePanel == panelSessions)
 	statusText := fmt.Sprintf("Status: %s | Selected: %d", m.status, m.SelectedCount())
+	if m.filterMode {
+		statusText = fmt.Sprintf("%s | Filter: %s", statusText, m.currentFilter())
+	}
 	status := m.styles.statusBar.Render(padRight(truncateRight(statusText, colW+rightW), colW+rightW))
 	keys := m.renderKeyBar(colW + rightW)
 
@@ -263,11 +282,11 @@ func (m *Model) activePane() *paneState {
 func (m Model) activeLen() int {
 	switch m.activePanel {
 	case panelTarget:
-		return len(m.targetNodes)
+		return len(m.visibleTargetNodes())
 	case panelSessions:
 		return len(m.SessionsForCurrentSource())
 	default:
-		return len(m.sourceNodes)
+		return len(m.visibleSourceNodes())
 	}
 }
 
@@ -288,8 +307,8 @@ func (m Model) activeViewportHeight() int {
 }
 
 func (m *Model) clampAll() {
-	m.clampPane(&m.sourcePane, len(m.sourceNodes), m.topViewportHeight())
-	m.clampPane(&m.targetPane, len(m.targetNodes), m.topViewportHeight())
+	m.clampPane(&m.sourcePane, len(m.visibleSourceNodes()), m.topViewportHeight())
+	m.clampPane(&m.targetPane, len(m.visibleTargetNodes()), m.topViewportHeight())
 	m.clampPane(&m.sessionPane, len(m.SessionsForCurrentSource()), m.sessionViewportHeight())
 }
 
@@ -324,6 +343,9 @@ func (m *Model) ensureVisible(p *paneState, height int) {
 }
 
 func (m Model) renderTreePane(title string, nodes []treeNode, pane paneState, width, height int, active bool, orphanable bool) string {
+	if active && (title == "Source" || title == "Target") && m.currentFilterForTitle(title) != "" {
+		title = fmt.Sprintf("%s /%s", title, m.currentFilterForTitle(title))
+	}
 	lines := make([]string, 0, len(nodes))
 	orphan := make(map[int]bool)
 	for i, node := range nodes {
@@ -606,11 +628,15 @@ func (m *Model) selectAllCurrentSourceSessions() {
 }
 
 func (m *Model) collapseOrAscendTarget() bool {
-	if len(m.targetNodes) == 0 {
+	nodes := m.visibleTargetNodes()
+	if len(nodes) == 0 {
 		return false
 	}
-	node := m.targetNodes[m.targetPane.cursor]
-	if node.Path == m.targetRoot && node.Depth == 0 {
+	node := nodes[m.targetPane.cursor]
+	if node.ParentNav {
+		return false
+	}
+	if node.Path == m.targetViewRoot && node.Depth == 0 {
 		return false
 	}
 	if node.Expanded {
@@ -619,7 +645,7 @@ func (m *Model) collapseOrAscendTarget() bool {
 		return true
 	}
 	for i := m.targetPane.cursor - 1; i >= 0; i-- {
-		if m.targetNodes[i].Depth == node.Depth-1 {
+		if nodes[i].Depth == node.Depth-1 {
 			m.targetPane.cursor = i
 			m.ensureVisible(&m.targetPane, m.topViewportHeight())
 			return true
@@ -629,32 +655,291 @@ func (m *Model) collapseOrAscendTarget() bool {
 }
 
 func (m *Model) expandOrDescendTarget() {
-	if len(m.targetNodes) == 0 {
+	nodes := m.visibleTargetNodes()
+	if len(nodes) == 0 {
 		return
 	}
-	node := m.targetNodes[m.targetPane.cursor]
+	node := nodes[m.targetPane.cursor]
 	if node.HasChildren && !node.Expanded {
 		m.targetExpanded[node.Path] = struct{}{}
 		m.reloadTargetNodes("")
 		return
 	}
-	if node.Expanded && m.targetPane.cursor+1 < len(m.targetNodes) && m.targetNodes[m.targetPane.cursor+1].Depth == node.Depth+1 {
+	if node.Expanded && m.targetPane.cursor+1 < len(nodes) && nodes[m.targetPane.cursor+1].Depth == node.Depth+1 {
 		m.targetPane.cursor++
 		m.ensureVisible(&m.targetPane, m.topViewportHeight())
 	}
 }
 
 func (m *Model) reloadTargetNodes(statusPrefix string) {
-	nodes, err := buildTargetNodes(m.targetRoot, m.targetExpanded, m.knownCounts)
+	nodes, err := buildTargetNodes(m.targetViewRoot, m.targetExpanded, m.knownCounts)
 	if err != nil {
 		m.status = strings.TrimSpace(statusPrefix + " target read error: " + err.Error())
 		return
 	}
 	m.targetNodes = nodes
-	m.clampPane(&m.targetPane, len(m.targetNodes), m.topViewportHeight())
+	m.clampPane(&m.targetPane, len(m.visibleTargetNodes()), m.topViewportHeight())
 	if statusPrefix != "" {
 		m.status = strings.TrimSpace(statusPrefix)
 	}
+}
+
+func (m Model) visibleSourceNodes() []treeNode {
+	return filterTreeNodes(scopeSourceNodes(m.sourceNodes, m.sourceViewRoot), m.sourceFilter)
+}
+
+func (m Model) visibleTargetNodes() []treeNode {
+	return filterTreeNodes(scopeTargetNodes(m.targetNodes, m.targetBaseRoot, m.targetViewRoot), m.targetFilter)
+}
+
+func filterTreeNodes(nodes []treeNode, query string) []treeNode {
+	if query == "" {
+		return nodes
+	}
+	out := make([]treeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if fuzzyMatch(query, node.Name) || fuzzyMatch(query, filepath.Base(node.Path)) {
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
+func fuzzyMatch(query, candidate string) bool {
+	query = normalizeFilterText(query)
+	candidate = normalizeFilterText(candidate)
+	if query == "" {
+		return true
+	}
+	q := []rune(query)
+	qi := 0
+	for _, r := range []rune(candidate) {
+		if qi < len(q) && r == q[qi] {
+			qi++
+		}
+	}
+	return qi == len(q)
+}
+
+func normalizeFilterText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
+}
+
+func (m *Model) enterFilterMode() {
+	if m.activePanel != panelSource && m.activePanel != panelTarget {
+		m.status = "filter only works in source and target panes"
+		return
+	}
+	m.filterMode = true
+	if m.currentFilter() == "" {
+		m.status = "filter: type to search, enter to keep, esc to clear"
+	} else {
+		m.status = fmt.Sprintf("filter: %s", m.currentFilter())
+	}
+}
+
+func (m *Model) enterCurrentNode() {
+	switch m.activePanel {
+	case panelSource:
+		m.enterSourceNode()
+	case panelTarget:
+		m.enterTargetNode()
+	}
+}
+
+func (m *Model) enterSourceNode() {
+	nodes := m.visibleSourceNodes()
+	if len(nodes) == 0 || m.sourcePane.cursor < 0 || m.sourcePane.cursor >= len(nodes) {
+		return
+	}
+	node := nodes[m.sourcePane.cursor]
+	if node.ParentNav {
+		m.sourceViewRoot = sourceParentRoot(m.sourceNodes, m.sourceViewRoot)
+	} else {
+		m.sourceViewRoot = node.Path
+	}
+	m.sourceFilter = ""
+	m.filterMode = false
+	m.resetSourcePaneCursor()
+	m.sessionPane.cursor = 0
+	m.sessionPane.offset = 0
+	m.clampPane(&m.sessionPane, len(m.SessionsForCurrentSource()), m.sessionViewportHeight())
+	m.status = fmt.Sprintf("source entered: %s", m.CurrentSourceFolder())
+}
+
+func (m *Model) enterTargetNode() {
+	nodes := m.visibleTargetNodes()
+	if len(nodes) == 0 || m.targetPane.cursor < 0 || m.targetPane.cursor >= len(nodes) {
+		return
+	}
+	node := nodes[m.targetPane.cursor]
+	if node.ParentNav {
+		if filepath.Clean(m.targetViewRoot) == filepath.Clean(m.targetBaseRoot) {
+			return
+		}
+		m.targetViewRoot = filepath.Dir(m.targetViewRoot)
+	} else {
+		m.targetViewRoot = node.Path
+	}
+	m.targetFilter = ""
+	m.filterMode = false
+	m.reloadTargetNodes("")
+	m.resetTargetPaneCursor()
+	m.status = fmt.Sprintf("target entered: %s", m.CurrentTargetFolder())
+}
+
+func (m Model) currentFilter() string {
+	switch m.activePanel {
+	case panelTarget:
+		return m.targetFilter
+	default:
+		return m.sourceFilter
+	}
+}
+
+func (m *Model) setCurrentFilter(query string) {
+	switch m.activePanel {
+	case panelTarget:
+		m.targetFilter = query
+		m.clampPane(&m.targetPane, len(m.visibleTargetNodes()), m.topViewportHeight())
+	default:
+		m.sourceFilter = query
+		m.clampPane(&m.sourcePane, len(m.visibleSourceNodes()), m.topViewportHeight())
+		m.sessionPane.cursor = 0
+		m.sessionPane.offset = 0
+		m.clampPane(&m.sessionPane, len(m.SessionsForCurrentSource()), m.sessionViewportHeight())
+	}
+}
+
+func (m Model) currentFilterForTitle(title string) string {
+	switch title {
+	case "Source":
+		return m.sourceFilter
+	case "Target":
+		return m.targetFilter
+	default:
+		return ""
+	}
+}
+
+func (m Model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.setCurrentFilter("")
+		m.filterMode = false
+		m.status = "filter cleared"
+	case "enter":
+		m.filterMode = false
+		if m.currentFilter() == "" {
+			m.status = "filter closed"
+			break
+		}
+		m.enterCurrentNode()
+	case "backspace", "ctrl+h":
+		query := m.currentFilter()
+		if query != "" {
+			r := []rune(query)
+			m.setCurrentFilter(string(r[:len(r)-1]))
+		}
+		m.status = fmt.Sprintf("filter: %s", m.currentFilter())
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.setCurrentFilter(m.currentFilter() + string(msg.Runes))
+			m.status = fmt.Sprintf("filter: %s", m.currentFilter())
+		}
+	}
+	return m, nil
+}
+
+func scopeSourceNodes(nodes []treeNode, viewRoot string) []treeNode {
+	if viewRoot == "" {
+		return nodes
+	}
+	rootIdx := findNodeIndexByPath(nodes, viewRoot)
+	if rootIdx < 0 {
+		return nodes
+	}
+	root := nodes[rootIdx]
+	out := make([]treeNode, 0, len(nodes)-rootIdx+1)
+	if parent := sourceParentRoot(nodes, viewRoot); parent != "" {
+		out = append(out, treeNode{Path: parent, Name: "..", ParentNav: true})
+	}
+	rootNode := root
+	rootNode.Depth = 0
+	out = append(out, rootNode)
+	for i := rootIdx + 1; i < len(nodes); i++ {
+		if nodes[i].Depth <= root.Depth {
+			break
+		}
+		child := nodes[i]
+		child.Depth -= root.Depth
+		out = append(out, child)
+	}
+	return out
+}
+
+func sourceParentRoot(nodes []treeNode, viewRoot string) string {
+	if viewRoot == "" {
+		return ""
+	}
+	best := ""
+	for _, node := range nodes {
+		if node.Path == viewRoot || node.ParentNav {
+			continue
+		}
+		prefix := node.Path + string(filepath.Separator)
+		if strings.HasPrefix(viewRoot+string(filepath.Separator), prefix) && len(node.Path) > len(best) {
+			best = node.Path
+		}
+	}
+	return best
+}
+
+func scopeTargetNodes(nodes []treeNode, baseRoot, viewRoot string) []treeNode {
+	if viewRoot == "" || filepath.Clean(viewRoot) == filepath.Clean(baseRoot) {
+		return nodes
+	}
+	out := make([]treeNode, 0, len(nodes)+1)
+	out = append(out, treeNode{Path: filepath.Dir(viewRoot), Name: "..", ParentNav: true})
+	out = append(out, nodes...)
+	return out
+}
+
+func findNodeIndexByPath(nodes []treeNode, path string) int {
+	for i, node := range nodes {
+		if node.Path == path {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *Model) resetSourcePaneCursor() {
+	m.sourcePane.offset = 0
+	if m.sourceViewRoot == "" {
+		m.sourcePane.cursor = 0
+	} else {
+		m.sourcePane.cursor = 1
+	}
+	m.clampPane(&m.sourcePane, len(m.visibleSourceNodes()), m.topViewportHeight())
+}
+
+func (m *Model) resetTargetPaneCursor() {
+	m.targetPane.offset = 0
+	if filepath.Clean(m.targetViewRoot) == filepath.Clean(m.targetBaseRoot) {
+		m.targetPane.cursor = 0
+	} else {
+		m.targetPane.cursor = 1
+	}
+	m.clampPane(&m.targetPane, len(m.visibleTargetNodes()), m.topViewportHeight())
 }
 
 func nextPanel(current int) int {

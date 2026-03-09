@@ -1,6 +1,12 @@
 package sessionindex
 
-import "time"
+import (
+	"regexp"
+	"strings"
+	"time"
+)
+
+var whitespaceRE = regexp.MustCompile(`\s+`)
 
 // SessionRecord is one discovered Codex session file with extracted cwd metadata.
 type SessionRecord struct {
@@ -35,12 +41,20 @@ func (r SessionRecord) EffectiveCWD() string {
 // DisplayLabel returns the best available session summary for list displays.
 func (r SessionRecord) DisplayLabel() string {
 	if r.FirstUserMessage != "" {
-		return r.FirstUserMessage
+		return normalizeDisplayText(r.FirstUserMessage)
 	}
 	if r.LastUserMessage != "" {
-		return r.LastUserMessage
+		return normalizeDisplayText(r.LastUserMessage)
 	}
-	return r.SessionID
+	return normalizeDisplayText(r.SessionID)
+}
+
+func normalizeDisplayText(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	return whitespaceRE.ReplaceAllString(s, " ")
 }
 
 type Warning struct {

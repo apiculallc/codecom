@@ -17,6 +17,7 @@ type treeNode struct {
 	HasChildren       bool
 	KnownSessionCount int
 	Orphan            bool
+	ParentNav         bool
 }
 
 type sourceTreeNode struct {

@@ -89,7 +89,7 @@ func TestFitPathLabelUsesMiddleEllipsisOnlyWhenNeeded(t *testing.T) {
 func TestViewContainsPaneHeadersAndKeys(t *testing.T) {
 	m := NewModelWithTargetRoot(nil, t.TempDir())
 	view := m.View()
-	for _, expected := range []string{"Source", "Target", "Sessions", "F5", "refresh", "F6", "move", "Status:"} {
+	for _, expected := range []string{"Source", "Target", "Sessions", "F5", "refresh", "F6", "move", "/", "filter", "Enter", "open", "Status:"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("view missing %q: %q", expected, view)
 		}
@@ -318,6 +318,176 @@ func TestViewMarksSelectedSessions(t *testing.T) {
 	}
 	if !strings.Contains(view, "Selected: 1") {
 		t.Fatalf("expected selected count in status, got %q", view)
+	}
+}
+
+func TestSlashEntersSourceFilterModeAndFuzzyMatches(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "a", SessionMetaCWD: "/repo/project-alpha"},
+		{SessionID: "b", SessionMetaCWD: "/repo/project-beta"},
+		{SessionID: "c", SessionMetaCWD: "/repo/docs"},
+	}
+	m := NewModelWithTargetRoot(records, t.TempDir())
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mm := updated.(Model)
+	if !mm.filterMode {
+		t.Fatal("expected filter mode after slash")
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p', 'h', 'a'}})
+	mm = updated.(Model)
+	if mm.sourceFilter != "pha" {
+		t.Fatalf("expected source filter to be updated, got %q", mm.sourceFilter)
+	}
+	if got := len(mm.visibleSourceNodes()); got != 1 {
+		t.Fatalf("expected 1 fuzzy-matched source node, got %d", got)
+	}
+	if got := mm.CurrentSourceFolder(); got != "/repo/project-alpha" {
+		t.Fatalf("expected filtered source selection to track visible row, got %q", got)
+	}
+}
+
+func TestSlashEntersTargetFilterModeAndFuzzyMatches(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "home-root")
+	mustMkdirAll(t, root)
+	mustMkdirAll(t, filepath.Join(root, "alpha"))
+	mustMkdirAll(t, filepath.Join(root, "beta"))
+	mustMkdirAll(t, filepath.Join(root, "docs"))
+	m := NewModelWithTargetRoot(nil, root)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	mm := updated.(Model)
+	if mm.activePanel != panelTarget {
+		t.Fatalf("expected target active, got %d", mm.activePanel)
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mm = updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b', 't', 'a'}})
+	mm = updated.(Model)
+	if mm.targetFilter != "bta" {
+		t.Fatalf("expected target filter to be updated, got %q", mm.targetFilter)
+	}
+	if got := len(mm.visibleTargetNodes()); got != 1 {
+		t.Fatalf("expected 1 fuzzy-matched target node, got %d", got)
+	}
+	if got := mm.CurrentTargetFolder(); got != filepath.Join(root, "beta") {
+		t.Fatalf("expected filtered target selection to track visible row, got %q", got)
+	}
+}
+
+func TestFilterEscClearsCurrentPaneQuery(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "a", SessionMetaCWD: "/repo/project-alpha"},
+		{SessionID: "b", SessionMetaCWD: "/repo/docs"},
+	}
+	m := NewModelWithTargetRoot(records, t.TempDir())
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p', 'h', 'a'}})
+	mm = updated.(Model)
+	if len(mm.visibleSourceNodes()) != 1 {
+		t.Fatalf("expected filtered source nodes before clear, got %d", len(mm.visibleSourceNodes()))
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(Model)
+	if mm.filterMode {
+		t.Fatal("expected filter mode to end on esc")
+	}
+	if mm.sourceFilter != "" {
+		t.Fatalf("expected source filter to be cleared, got %q", mm.sourceFilter)
+	}
+	if len(mm.visibleSourceNodes()) != len(mm.sourceNodes) {
+		t.Fatalf("expected source nodes to be restored after esc, got %d vs %d", len(mm.visibleSourceNodes()), len(mm.sourceNodes))
+	}
+}
+
+func TestFilterIgnoredInSessionsPane(t *testing.T) {
+	m := NewModelWithTargetRoot([]sessionindex.SessionRecord{{SessionID: "a", SessionMetaCWD: "/repo/src"}}, t.TempDir())
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm := updated.(Model)
+	if mm.activePanel != panelSessions {
+		t.Fatalf("expected sessions active, got %d", mm.activePanel)
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mm = updated.(Model)
+	if mm.filterMode {
+		t.Fatal("expected filter mode to stay off in sessions pane")
+	}
+	if mm.status != "filter only works in source and target panes" {
+		t.Fatalf("unexpected status: %q", mm.status)
+	}
+}
+
+func TestEnterOnFilteredSourceScopesTreeAndAddsParentRow(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "a", SessionMetaCWD: "/repo/project-alpha"},
+		{SessionID: "b", SessionMetaCWD: "/repo/project-beta"},
+	}
+	m := NewModelWithTargetRoot(records, t.TempDir())
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a', 'l', 'p'}})
+	mm = updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+
+	if mm.filterMode {
+		t.Fatal("expected filter mode to end after enter")
+	}
+	if mm.sourceFilter != "" {
+		t.Fatalf("expected source filter to clear after enter, got %q", mm.sourceFilter)
+	}
+	nodes := mm.visibleSourceNodes()
+	if len(nodes) < 2 {
+		t.Fatalf("expected scoped source nodes with parent row, got %#v", nodes)
+	}
+	if !nodes[0].ParentNav || nodes[0].Name != ".." {
+		t.Fatalf("expected parent row at top, got %#v", nodes[0])
+	}
+	if got := mm.CurrentSourceFolder(); got != "/repo/project-alpha" {
+		t.Fatalf("expected current source to be entered node, got %q", got)
+	}
+}
+
+func TestEnterOnFilteredTargetScopesTreeAndParentRowReturnsUp(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "home-root")
+	mustMkdirAll(t, filepath.Join(root, "alpha", "sub"))
+	mustMkdirAll(t, filepath.Join(root, "beta"))
+	m := NewModelWithTargetRoot(nil, root)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mm = updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a', 'l', 'p'}})
+	mm = updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+
+	nodes := mm.visibleTargetNodes()
+	if len(nodes) < 2 {
+		t.Fatalf("expected scoped target nodes with parent row, got %#v", nodes)
+	}
+	if !nodes[0].ParentNav || nodes[0].Name != ".." {
+		t.Fatalf("expected parent row at top, got %#v", nodes[0])
+	}
+	if got := mm.CurrentTargetFolder(); got != filepath.Join(root, "alpha") {
+		t.Fatalf("expected current target to be entered node, got %q", got)
+	}
+
+	mm.targetPane.cursor = 0
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+	if got := mm.CurrentTargetFolder(); got != root {
+		t.Fatalf("expected enter on parent row to return to root, got %q", got)
 	}
 }
 

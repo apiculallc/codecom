@@ -119,4 +119,9 @@ func TestSessionRecordDisplayLabelPrefersFirstUserMessage(t *testing.T) {
 	if got := rec.DisplayLabel(); got != "sid-1" {
 		t.Fatalf("unexpected display label final fallback: %q", got)
 	}
+
+	rec = SessionRecord{SessionID: "sid-1", FirstUserMessage: "first line\r\nsecond\tline\nthird"}
+	if got := rec.DisplayLabel(); got != "first line second line third" {
+		t.Fatalf("unexpected normalized display label: %q", got)
+	}
 }
