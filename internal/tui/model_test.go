@@ -491,6 +491,26 @@ func TestEnterOnFilteredTargetScopesTreeAndParentRowReturnsUp(t *testing.T) {
 	}
 }
 
+func TestEnterTargetShowsChildrenImmediately(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "projects", "app1"))
+	m := NewModelWithTargetRoot(nil, root)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyDown})
+	mm = updated.(Model)
+	if got := mm.CurrentTargetFolder(); got != filepath.Join(root, "projects") {
+		t.Fatalf("expected projects selected, got %q", got)
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+	if !containsPath(targetPaths(mm), filepath.Join(root, "projects", "app1")) {
+		t.Fatalf("expected child folder visible after enter, got %#v", targetPaths(mm))
+	}
+}
+
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {

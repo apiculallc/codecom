@@ -791,6 +791,8 @@ func (m *Model) enterTargetNode() {
 	}
 	m.targetFilter = ""
 	m.filterMode = false
+	// Keep MC-style "enter folder" behavior: entered root should show its children immediately.
+	m.targetExpanded[m.targetViewRoot] = struct{}{}
 	m.reloadTargetNodes("")
 	m.resetTargetPaneCursor()
 	m.status = fmt.Sprintf("target entered: %s", m.CurrentTargetFolder())
