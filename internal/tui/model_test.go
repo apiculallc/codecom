@@ -150,7 +150,33 @@ func TestF5RefreshRescansSessions(t *testing.T) {
 	}
 }
 
-func TestF6PerformsMoveAndClearsSelection(t *testing.T) {
+func TestF6OpensMoveConfirmationWithoutExecuting(t *testing.T) {
+	targetRoot := t.TempDir()
+	records := []sessionindex.SessionRecord{
+		{SessionID: "sid-1", SessionFile: "/tmp/s1.jsonl", SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModelWithTargetRoot(records, targetRoot).WithCodexRoot("/codex")
+	m.selected["/tmp/s1.jsonl"] = struct{}{}
+	execCalled := false
+	m.executePlan = func(codexRoot string, plan mv.Plan) (mv.ExecuteResult, error) {
+		execCalled = true
+		return mv.ExecuteResult{FileCommits: 1}, nil
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF6})
+	mm := updated.(Model)
+	if execCalled {
+		t.Fatal("expected f6 to not execute move before confirmation")
+	}
+	if !mm.moveConfirmOpen {
+		t.Fatal("expected move confirmation state to open")
+	}
+	if !strings.Contains(mm.status, "confirm move:") {
+		t.Fatalf("unexpected status: %q", mm.status)
+	}
+}
+
+func TestMoveConfirmationConfirmExecutesMoveAndClearsSelection(t *testing.T) {
 	targetRoot := t.TempDir()
 	records := []sessionindex.SessionRecord{
 		{SessionID: "sid-1", SessionFile: "/tmp/s1.jsonl", SessionMetaCWD: "/repo/src"},
@@ -193,8 +219,13 @@ func TestF6PerformsMoveAndClearsSelection(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF6})
 	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
 	if !buildCalled || !execCalled || !scanCalled {
 		t.Fatalf("expected build/execute/scan calls, got build=%v exec=%v scan=%v", buildCalled, execCalled, scanCalled)
+	}
+	if mm.moveConfirmOpen {
+		t.Fatal("expected move confirmation state to close after confirm")
 	}
 	if mm.SelectedCount() != 0 {
 		t.Fatalf("expected selection cleared, got %d", mm.SelectedCount())
@@ -204,7 +235,35 @@ func TestF6PerformsMoveAndClearsSelection(t *testing.T) {
 	}
 }
 
-func TestF6ShowsValidationErrorCount(t *testing.T) {
+func TestMoveConfirmationCancelSkipsExecution(t *testing.T) {
+	targetRoot := t.TempDir()
+	records := []sessionindex.SessionRecord{
+		{SessionID: "sid-1", SessionFile: "/tmp/s1.jsonl", SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModelWithTargetRoot(records, targetRoot).WithCodexRoot("/codex")
+	m.selected["/tmp/s1.jsonl"] = struct{}{}
+	execCalled := false
+	m.executePlan = func(codexRoot string, plan mv.Plan) (mv.ExecuteResult, error) {
+		execCalled = true
+		return mv.ExecuteResult{}, nil
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF6})
+	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(Model)
+	if execCalled {
+		t.Fatal("expected cancel to skip move execution")
+	}
+	if mm.moveConfirmOpen {
+		t.Fatal("expected move confirmation state to close after cancel")
+	}
+	if mm.status != "move canceled" {
+		t.Fatalf("unexpected status: %q", mm.status)
+	}
+}
+
+func TestMoveConfirmationShowsValidationErrorCount(t *testing.T) {
 	targetRoot := t.TempDir()
 	records := []sessionindex.SessionRecord{
 		{SessionID: "sid-1", SessionFile: "/tmp/s1.jsonl", SessionMetaCWD: "/repo/src"},
@@ -220,6 +279,8 @@ func TestF6ShowsValidationErrorCount(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF6})
 	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	mm = updated.(Model)
 	if mm.status != "move blocked: 1 validation error(s)" {
 		t.Fatalf("unexpected status: %q", mm.status)
 	}

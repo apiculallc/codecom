@@ -53,23 +53,24 @@ type Model struct {
 	buildPlan       buildPlanFunc
 	executePlan     executePlanFunc
 
-	sourcePane   paneState
-	targetPane   paneState
-	sessionPane  paneState
-	activePanel  int
-	filterMode   bool
-	sourceFilter string
-	targetFilter string
-	popupOpen    bool
-	popupTitle   string
-	popupSession string
-	popupOffsets []int64
-	popupStatic  []string
-	popupPane    paneState
-	status       string
-	width        int
-	height       int
-	styles       styles
+	sourcePane      paneState
+	targetPane      paneState
+	sessionPane     paneState
+	activePanel     int
+	filterMode      bool
+	sourceFilter    string
+	targetFilter    string
+	popupOpen       bool
+	popupTitle      string
+	popupSession    string
+	popupOffsets    []int64
+	popupStatic     []string
+	popupPane       paneState
+	moveConfirmOpen bool
+	status          string
+	width           int
+	height          int
+	styles          styles
 }
 
 func NewModel(records []sessionindex.SessionRecord) Model {
@@ -124,6 +125,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.clampAll()
 	case tea.KeyMsg:
+		if m.moveConfirmOpen {
+			return m.updateMoveConfirm(msg)
+		}
 		if m.popupOpen {
 			return m.updatePopup(msg)
 		}
@@ -160,7 +164,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f5":
 			m.refreshFromDisk()
 		case "f6":
-			m.performMove()
+			m.openMoveConfirmation()
 		case "space", " ":
 			m.toggleCurrentSessionSelection()
 		case "a":
@@ -242,6 +246,9 @@ func (m Model) SessionsForCurrentSource() []sessionindex.SessionRecord {
 
 func (m Model) View() string {
 	main := m.renderMainView()
+	if m.moveConfirmOpen {
+		return m.renderMoveConfirmation(main)
+	}
 	if !m.popupOpen {
 		return main
 	}
@@ -682,6 +689,26 @@ func (m *Model) selectedSessions() []sessionindex.SessionRecord {
 	return out
 }
 
+func (m *Model) openMoveConfirmation() {
+	if m.codexRoot == "" || m.codexRoot == "." {
+		m.status = "move unavailable: codex root not configured"
+		return
+	}
+	selected := m.selectedSessions()
+	if len(selected) == 0 {
+		m.status = "move blocked: no selected sessions"
+		return
+	}
+	source := m.CurrentSourceFolder()
+	target := m.CurrentTargetFolder()
+	if source == "" || target == "" {
+		m.status = "move blocked: source/target folder is empty"
+		return
+	}
+	m.moveConfirmOpen = true
+	m.status = fmt.Sprintf("confirm move: %d session(s) | enter/y confirm | esc/n cancel", len(selected))
+}
+
 func (m *Model) performMove() {
 	if m.codexRoot == "" || m.codexRoot == "." {
 		m.status = "move unavailable: codex root not configured"
@@ -721,6 +748,38 @@ func (m *Model) performMove() {
 		}
 		m.status = msg
 	}
+}
+
+func (m Model) updateMoveConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "y":
+		m.moveConfirmOpen = false
+		m.performMove()
+	case "esc", "n":
+		m.moveConfirmOpen = false
+		m.status = "move canceled"
+	}
+	return m, nil
+}
+
+func (m Model) renderMoveConfirmation(_ string) string {
+	w, h := m.dimensions()
+	boxW := min(max(40, w-12), 84)
+	frame := m.styles.activePane.
+		Width(max(1, boxW-m.styles.activePane.GetHorizontalFrameSize())).
+		Height(max(1, 7-m.styles.activePane.GetVerticalFrameSize()))
+	source := truncateRight(m.CurrentSourceFolder(), max(10, boxW-16))
+	target := truncateRight(m.CurrentTargetFolder(), max(10, boxW-16))
+	body := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.styles.activeTitle.Render(" Confirm Move "),
+		fmt.Sprintf("Source: %s", source),
+		fmt.Sprintf("Target: %s", target),
+		fmt.Sprintf("Selected sessions: %d", m.SelectedCount()),
+		"Enter/Y confirm, Esc/N cancel",
+	)
+	box := frame.Render(body)
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m *Model) refreshFromDisk() {
