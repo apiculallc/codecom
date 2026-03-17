@@ -2,10 +2,13 @@ package app
 
 import (
 	"bytes"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestRunScanJSONWritesDataToStdoutAndWarningsToStderr(t *testing.T) {
@@ -91,5 +94,63 @@ func TestRunScanDoesNotCreateConfigFile(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "codecom.toml")); !os.IsNotExist(err) {
 		t.Fatalf("scan should not write config file, got stat err=%v", err)
+	}
+}
+
+func TestRunScanReadOnlyDoesNotMutateJSONLOrSQLite(t *testing.T) {
+	root := t.TempDir()
+	sessionFile := filepath.Join(root, "sessions", "2026", "02", "26", "a.jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initialJSONL := "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/proj\",\"session_id\":\"sid-1\"}}\n"
+	if err := os.WriteFile(sessionFile, []byte(initialJSONL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sqlitePath := filepath.Join(root, "state_5.sqlite")
+	db, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, rollout_path TEXT);
+INSERT INTO threads(id, cwd, rollout_path) VALUES('sid-1', '/tmp/proj', '/tmp/a.jsonl');
+`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed sqlite: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite: %v", err)
+	}
+
+	beforeJSON, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDB, err := os.ReadFile(sqlitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if err := RunScan([]string{"--json", "--codex-dir", root}, &out, &errOut); err != nil {
+		t.Fatalf("RunScan returned error: %v", err)
+	}
+
+	afterJSON, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterDB, err := os.ReadFile(sqlitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterJSON) != string(beforeJSON) {
+		t.Fatalf("scan must not rewrite jsonl\nbefore=%q\nafter=%q", string(beforeJSON), string(afterJSON))
+	}
+	if string(afterDB) != string(beforeDB) {
+		t.Fatal("scan must not mutate sqlite database file")
 	}
 }

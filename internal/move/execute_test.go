@@ -108,6 +108,63 @@ func TestExecutePlanCreatesSnapshotWhenDirty(t *testing.T) {
 	}
 }
 
+func TestExecutePlanValidationFailureDoesNotWrite(t *testing.T) {
+	repo := initGitRepo(t)
+	sourceRoot := filepath.Join(repo, "workspace", "old")
+	targetRoot := filepath.Join(repo, "workspace", "new")
+	oldCWD := filepath.Join(sourceRoot, "proj")
+	// Intentionally do not create mapped target directory under targetRoot.
+	sessionFile := filepath.Join(repo, "sessions", "2026", "03", "17", "s1.jsonl")
+	sqlitePath := filepath.Join(repo, "state_5.sqlite")
+
+	mkdirAllT(t, oldCWD, filepath.Dir(sessionFile))
+	writeFileT(t, sessionFile, `{"type":"session_meta","payload":{"cwd":"`+oldCWD+`","session_id":"sid-1"}}`+"\n")
+	writeSQLiteThreads(t, sqlitePath, []threadRow{{ID: "sid-1", CWD: oldCWD}})
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-m", "init")
+
+	beforeJSON, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCWD := sqliteCWD(t, sqlitePath, "sid-1")
+	beforeHead := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+
+	plan := Plan{
+		SourceRoot: sourceRoot,
+		TargetRoot: targetRoot,
+		Items: []PlanItem{{
+			SessionID:   "sid-1",
+			SessionFile: sessionFile,
+			OldCWD:      oldCWD,
+			NewCWD:      filepath.Join(targetRoot, "proj"),
+		}},
+	}
+	_, err = ExecutePlan(repo, plan)
+	if err == nil {
+		t.Fatal("expected validation failure")
+	}
+	if _, ok := err.(*ValidationErrors); !ok {
+		t.Fatalf("expected ValidationErrors, got %T (%v)", err, err)
+	}
+
+	afterJSON, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterJSON) != string(beforeJSON) {
+		t.Fatalf("session file should remain unchanged, before=%q after=%q", string(beforeJSON), string(afterJSON))
+	}
+	afterCWD := sqliteCWD(t, sqlitePath, "sid-1")
+	if afterCWD != beforeCWD {
+		t.Fatalf("sqlite cwd changed unexpectedly: before=%q after=%q", beforeCWD, afterCWD)
+	}
+	afterHead := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	if afterHead != beforeHead {
+		t.Fatalf("git head changed unexpectedly: before=%s after=%s", beforeHead, afterHead)
+	}
+}
+
 type threadRow struct {
 	ID          string
 	CWD         string
@@ -145,6 +202,20 @@ func assertSQLiteCWD(t *testing.T, dbPath, id, want string) {
 	if got != want {
 		t.Fatalf("unexpected sqlite cwd: got %q want %q", got, want)
 	}
+}
+
+func sqliteCWD(t *testing.T, dbPath, id string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var got string
+	if err := db.QueryRow(`SELECT cwd FROM threads WHERE id = ?`, id).Scan(&got); err != nil {
+		t.Fatalf("query sqlite cwd: %v", err)
+	}
+	return got
 }
 
 func initGitRepo(t *testing.T) string {
