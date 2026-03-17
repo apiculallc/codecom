@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	mv "codecom/internal/move"
 	"codecom/internal/sessionindex"
 )
 
@@ -31,6 +32,10 @@ type paneState struct {
 	offset int
 }
 
+type scanFunc func(string) (sessionindex.ScanResult, error)
+type buildPlanFunc func(string, string, []sessionindex.SessionRecord) (mv.Plan, error)
+type executePlanFunc func(string, mv.Plan) (mv.ExecuteResult, error)
+
 type Model struct {
 	sourceNodes []treeNode
 	targetNodes []treeNode
@@ -43,6 +48,10 @@ type Model struct {
 	targetExpanded  map[string]struct{}
 	knownCounts     map[string]int
 	knownSessionIDs map[string][]string
+	codexRoot       string
+	scanSessions    scanFunc
+	buildPlan       buildPlanFunc
+	executePlan     executePlanFunc
 
 	sourcePane   paneState
 	targetPane   paneState
@@ -90,12 +99,20 @@ func NewModelWithTargetRoot(records []sessionindex.SessionRecord, targetRoot str
 		targetExpanded:  expanded,
 		knownCounts:     knownCounts,
 		knownSessionIDs: knownSessionIDs,
+		scanSessions:    sessionindex.Scan,
+		buildPlan:       mv.BuildPlan,
+		executePlan:     mv.ExecutePlan,
 		activePanel:     panelSource,
 		status:          status,
 		width:           defaultWidth,
 		height:          defaultHeight,
 		styles:          newStyles(),
 	}
+}
+
+func (m Model) WithCodexRoot(root string) Model {
+	m.codexRoot = filepath.Clean(root)
+	return m
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -141,9 +158,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.enterCurrentNode()
 		case "f5":
-			m.status = "refresh requested"
+			m.refreshFromDisk()
 		case "f6":
-			m.status = "move requested (not implemented)"
+			m.performMove()
 		case "space", " ":
 			m.toggleCurrentSessionSelection()
 		case "a":
@@ -650,6 +667,95 @@ func (m *Model) selectAllCurrentSourceSessions() {
 		m.selected[row.SessionFile] = struct{}{}
 	}
 	m.status = fmt.Sprintf("selected %d session(s) in current source", len(rows))
+}
+
+func (m *Model) selectedSessions() []sessionindex.SessionRecord {
+	if len(m.selected) == 0 {
+		return nil
+	}
+	out := make([]sessionindex.SessionRecord, 0, len(m.selected))
+	for _, s := range m.sessions {
+		if _, ok := m.selected[s.SessionFile]; ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (m *Model) performMove() {
+	if m.codexRoot == "" || m.codexRoot == "." {
+		m.status = "move unavailable: codex root not configured"
+		return
+	}
+	selected := m.selectedSessions()
+	if len(selected) == 0 {
+		m.status = "move blocked: no selected sessions"
+		return
+	}
+	source := m.CurrentSourceFolder()
+	target := m.CurrentTargetFolder()
+	if source == "" || target == "" {
+		m.status = "move blocked: source/target folder is empty"
+		return
+	}
+	plan, err := m.buildPlan(source, target, selected)
+	if err != nil {
+		m.status = fmt.Sprintf("move planning failed: %v", err)
+		return
+	}
+	res, err := m.executePlan(m.codexRoot, plan)
+	if err != nil {
+		if verr, ok := err.(*mv.ValidationErrors); ok {
+			m.status = fmt.Sprintf("move blocked: %d validation error(s)", len(verr.Items))
+			return
+		}
+		m.status = fmt.Sprintf("move failed: %v", err)
+		return
+	}
+	m.selected = make(map[string]struct{})
+	m.refreshFromDisk()
+	if m.status == "refresh completed" {
+		msg := fmt.Sprintf("move complete: %d commit(s)", res.FileCommits)
+		if res.SnapshotCommitted {
+			msg += ", snapshot created"
+		}
+		m.status = msg
+	}
+}
+
+func (m *Model) refreshFromDisk() {
+	if m.codexRoot == "" || m.codexRoot == "." {
+		m.status = "refresh unavailable: codex root not configured"
+		return
+	}
+	res, err := m.scanSessions(m.codexRoot)
+	if err != nil {
+		m.status = fmt.Sprintf("refresh failed: %v", err)
+		return
+	}
+	m.sessions = res.Sessions
+	m.knownCounts = buildKnownSessionCounts(m.sessions)
+	m.knownSessionIDs = buildKnownSessionIDs(m.sessions)
+	m.sourceNodes = buildSourceTree(m.sessions)
+	m.reloadTargetNodes("")
+	m.pruneSelectedSet()
+	m.clampAll()
+	m.status = "refresh completed"
+}
+
+func (m *Model) pruneSelectedSet() {
+	if len(m.selected) == 0 {
+		return
+	}
+	known := make(map[string]struct{}, len(m.sessions))
+	for _, s := range m.sessions {
+		known[s.SessionFile] = struct{}{}
+	}
+	for path := range m.selected {
+		if _, ok := known[path]; !ok {
+			delete(m.selected, path)
+		}
+	}
 }
 
 func (m *Model) collapseOrAscendTarget() bool {

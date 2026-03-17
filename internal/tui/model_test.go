@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	mv "codecom/internal/move"
 	"codecom/internal/sessionindex"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -124,6 +125,103 @@ func TestWindowSizeRespectsTotalHeight(t *testing.T) {
 	lines := strings.Split(view, "\n")
 	if len(lines) > 24 {
 		t.Fatalf("expected rendered height <= 24, got %d", len(lines))
+	}
+}
+
+func TestF5RefreshRescansSessions(t *testing.T) {
+	initial := []sessionindex.SessionRecord{{SessionID: "1", SessionMetaCWD: "/repo/a", SessionFile: "/tmp/a.jsonl"}}
+	m := NewModelWithTargetRoot(initial, t.TempDir()).WithCodexRoot("/codex")
+	m.scanSessions = func(root string) (sessionindex.ScanResult, error) {
+		if root != "/codex" {
+			t.Fatalf("unexpected codex root: %q", root)
+		}
+		return sessionindex.ScanResult{
+			Sessions: []sessionindex.SessionRecord{{SessionID: "2", SessionMetaCWD: "/repo/b", SessionFile: "/tmp/b.jsonl"}},
+		}, nil
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF5})
+	mm := updated.(Model)
+	if mm.status != "refresh completed" {
+		t.Fatalf("unexpected status: %q", mm.status)
+	}
+	if len(mm.sessions) != 1 || mm.sessions[0].SessionID != "2" {
+		t.Fatalf("expected refreshed sessions, got %#v", mm.sessions)
+	}
+}
+
+func TestF6PerformsMoveAndClearsSelection(t *testing.T) {
+	targetRoot := t.TempDir()
+	records := []sessionindex.SessionRecord{
+		{SessionID: "sid-1", SessionFile: "/tmp/s1.jsonl", SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModelWithTargetRoot(records, targetRoot).WithCodexRoot("/codex")
+	m.selected["/tmp/s1.jsonl"] = struct{}{}
+	buildCalled := false
+	execCalled := false
+	scanCalled := false
+	m.buildPlan = func(source, target string, selected []sessionindex.SessionRecord) (mv.Plan, error) {
+		buildCalled = true
+		if len(selected) != 1 || selected[0].SessionID != "sid-1" {
+			t.Fatalf("unexpected selected rows: %#v", selected)
+		}
+		return mv.Plan{
+			SourceRoot: source,
+			TargetRoot: target,
+			Items: []mv.PlanItem{{
+				SessionID:   "sid-1",
+				SessionFile: "/tmp/s1.jsonl",
+				OldCWD:      "/repo/src",
+				NewCWD:      "/repo/dst/src",
+			}},
+		}, nil
+	}
+	m.executePlan = func(codexRoot string, plan mv.Plan) (mv.ExecuteResult, error) {
+		execCalled = true
+		if codexRoot != "/codex" {
+			t.Fatalf("unexpected codex root: %q", codexRoot)
+		}
+		if len(plan.Items) != 1 || plan.Items[0].SessionID != "sid-1" {
+			t.Fatalf("unexpected plan: %#v", plan)
+		}
+		return mv.ExecuteResult{FileCommits: 1}, nil
+	}
+	m.scanSessions = func(root string) (sessionindex.ScanResult, error) {
+		scanCalled = true
+		return sessionindex.ScanResult{Sessions: records}, nil
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF6})
+	mm := updated.(Model)
+	if !buildCalled || !execCalled || !scanCalled {
+		t.Fatalf("expected build/execute/scan calls, got build=%v exec=%v scan=%v", buildCalled, execCalled, scanCalled)
+	}
+	if mm.SelectedCount() != 0 {
+		t.Fatalf("expected selection cleared, got %d", mm.SelectedCount())
+	}
+	if !strings.Contains(mm.status, "move complete: 1 commit(s)") {
+		t.Fatalf("unexpected move status: %q", mm.status)
+	}
+}
+
+func TestF6ShowsValidationErrorCount(t *testing.T) {
+	targetRoot := t.TempDir()
+	records := []sessionindex.SessionRecord{
+		{SessionID: "sid-1", SessionFile: "/tmp/s1.jsonl", SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModelWithTargetRoot(records, targetRoot).WithCodexRoot("/codex")
+	m.selected["/tmp/s1.jsonl"] = struct{}{}
+	m.buildPlan = func(source, target string, selected []sessionindex.SessionRecord) (mv.Plan, error) {
+		return mv.Plan{SourceRoot: source, TargetRoot: target, Items: []mv.PlanItem{{SessionID: "sid-1", SessionFile: "/tmp/s1.jsonl"}}}, nil
+	}
+	m.executePlan = func(codexRoot string, plan mv.Plan) (mv.ExecuteResult, error) {
+		return mv.ExecuteResult{}, &mv.ValidationErrors{Items: []mv.ValidationError{{Message: "bad"}}}
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyF6})
+	mm := updated.(Model)
+	if mm.status != "move blocked: 1 validation error(s)" {
+		t.Fatalf("unexpected status: %q", mm.status)
 	}
 }
 

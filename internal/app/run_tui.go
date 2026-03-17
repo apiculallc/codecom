@@ -40,7 +40,7 @@ func RunTUI(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stderr, "warning: %s:%d: %s\n", w.SessionFile, w.Line, w.Message)
 	}
 
-	m := tui.NewModel(res.Sessions)
+	m := tui.NewModel(res.Sessions).WithCodexRoot(resolved)
 	if !isTerminalWriter(stdout) {
 		_, err := io.WriteString(stdout, m.View())
 		return err
