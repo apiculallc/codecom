@@ -2,6 +2,7 @@ package sessionindex
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,20 @@ func readSQLiteThreads(dbPath string) (map[string]sqliteThreadRow, error) {
 	return readSQLiteThreadsDB(db)
 }
 
+// EnsureSQLiteThreadsReady verifies state_5.sqlite exists and threads is queryable.
+func EnsureSQLiteThreadsReady(codexRoot string) error {
+	dbPath := filepath.Join(codexRoot, sqliteStateFileName)
+	if _, err := os.Stat(dbPath); err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return ensureSQLiteThreadsReadyDB(db)
+}
+
 func readSQLiteThreadsDB(db *sql.DB) (map[string]sqliteThreadRow, error) {
 	rows := make(map[string]sqliteThreadRow)
 	qrows, err := db.Query("SELECT id, cwd, COALESCE(rollout_path, '') FROM threads;")
@@ -77,6 +92,15 @@ func readSQLiteThreadsDB(db *sql.DB) (map[string]sqliteThreadRow, error) {
 		return nil, err
 	}
 	return rows, nil
+}
+
+func ensureSQLiteThreadsReadyDB(db *sql.DB) error {
+	var n int
+	err := db.QueryRow("SELECT 1 FROM threads LIMIT 1;").Scan(&n)
+	if err == nil || errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 // RewriteSQLiteThreadPaths updates cwd and rollout_path for selected session ids.

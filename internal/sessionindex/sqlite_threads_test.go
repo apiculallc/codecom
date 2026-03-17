@@ -67,6 +67,27 @@ INSERT INTO threads (id, cwd, rollout_path) VALUES
 	}
 }
 
+func TestEnsureSQLiteThreadsReadyDB(t *testing.T) {
+	db := openMemorySQLite(t)
+	mustExecSQL(t, db, `
+CREATE TABLE threads (
+  id TEXT PRIMARY KEY,
+  cwd TEXT,
+  rollout_path TEXT
+);
+`)
+	if err := ensureSQLiteThreadsReadyDB(db); err != nil {
+		t.Fatalf("ensureSQLiteThreadsReadyDB error: %v", err)
+	}
+}
+
+func TestEnsureSQLiteThreadsReadyDBMissingTable(t *testing.T) {
+	db := openMemorySQLite(t)
+	if err := ensureSQLiteThreadsReadyDB(db); err == nil {
+		t.Fatal("expected error when threads table is missing")
+	}
+}
+
 func openMemorySQLite(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
