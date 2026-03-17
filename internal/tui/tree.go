@@ -16,19 +16,21 @@ type treeNode struct {
 	Expanded          bool
 	HasChildren       bool
 	KnownSessionCount int
+	SessionIDs        []string
 	Orphan            bool
 	ParentNav         bool
 }
 
 type sourceTreeNode struct {
-	Path      string
-	Name      string
-	Children  map[string]*sourceTreeNode
-	Order     []string
-	Count     int
-	Orphan    bool
-	HasRecord bool
-	Expanded  bool
+	Path       string
+	Name       string
+	Children   map[string]*sourceTreeNode
+	Order      []string
+	Count      int
+	SessionIDs map[string]struct{}
+	Orphan     bool
+	HasRecord  bool
+	Expanded   bool
 }
 
 func detectTargetRoot() string {
@@ -51,8 +53,23 @@ func buildKnownSessionCounts(records []sessionindex.SessionRecord) map[string]in
 	return counts
 }
 
+func buildKnownSessionIDs(records []sessionindex.SessionRecord) map[string][]string {
+	byPath := make(map[string][]string)
+	for _, r := range records {
+		cwd := filepath.Clean(r.EffectiveCWD())
+		if cwd == "." || cwd == "" || r.SessionID == "" {
+			continue
+		}
+		byPath[cwd] = append(byPath[cwd], r.SessionID)
+	}
+	for path := range byPath {
+		sort.Strings(byPath[path])
+	}
+	return byPath
+}
+
 func buildSourceTree(records []sessionindex.SessionRecord) []treeNode {
-	root := &sourceTreeNode{Children: make(map[string]*sourceTreeNode), Expanded: true}
+	root := &sourceTreeNode{Children: make(map[string]*sourceTreeNode), SessionIDs: make(map[string]struct{}), Expanded: true}
 	for _, r := range records {
 		cwd := filepath.Clean(r.EffectiveCWD())
 		if cwd == "." || cwd == "" {
@@ -70,15 +87,19 @@ func buildSourceTree(records []sessionindex.SessionRecord) []treeNode {
 			}
 			if cur.Children[part] == nil {
 				cur.Children[part] = &sourceTreeNode{
-					Path:     accum,
-					Name:     part,
-					Children: make(map[string]*sourceTreeNode),
-					Expanded: true,
+					Path:       accum,
+					Name:       part,
+					Children:   make(map[string]*sourceTreeNode),
+					SessionIDs: make(map[string]struct{}),
+					Expanded:   true,
 				}
 				cur.Order = append(cur.Order, part)
 			}
 			cur = cur.Children[part]
 			cur.Count++
+			if r.SessionID != "" {
+				cur.SessionIDs[r.SessionID] = struct{}{}
+			}
 		}
 		cur.HasRecord = true
 		cur.Orphan = r.Orphan
@@ -99,6 +120,7 @@ func appendSourceChildren(out *[]treeNode, parent *sourceTreeNode, depth int) {
 			Expanded:          child.Expanded,
 			HasChildren:       len(child.Children) > 0,
 			KnownSessionCount: child.Count,
+			SessionIDs:        sourceSessionIDs(child),
 			Orphan:            child.Orphan,
 		}
 		*out = append(*out, node)
@@ -132,7 +154,19 @@ func compactSourceNode(node *sourceTreeNode) *sourceTreeNode {
 	return &copyNode
 }
 
-func buildTargetNodes(root string, expanded map[string]struct{}, knownCounts map[string]int) ([]treeNode, error) {
+func sourceSessionIDs(node *sourceTreeNode) []string {
+	if node == nil || len(node.SessionIDs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(node.SessionIDs))
+	for id := range node.SessionIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func buildTargetNodes(root string, expanded map[string]struct{}, knownCounts map[string]int, knownSessionIDs map[string][]string) ([]treeNode, error) {
 	root = filepath.Clean(root)
 	nodes := []treeNode{{
 		Path:              root,
@@ -141,6 +175,7 @@ func buildTargetNodes(root string, expanded map[string]struct{}, knownCounts map
 		Expanded:          isExpanded(root, expanded),
 		HasChildren:       hasVisibleDirChildren(root),
 		KnownSessionCount: knownCounts[root],
+		SessionIDs:        knownSessionIDs[root],
 	}}
 	if nodes[0].Name == "." || nodes[0].Name == string(filepath.Separator) || nodes[0].Name == "" {
 		nodes[0].Name = root
@@ -148,14 +183,14 @@ func buildTargetNodes(root string, expanded map[string]struct{}, knownCounts map
 	if !nodes[0].Expanded {
 		return nodes, nil
 	}
-	children, err := appendTargetChildren(root, 1, expanded, knownCounts)
+	children, err := appendTargetChildren(root, 1, expanded, knownCounts, knownSessionIDs)
 	if err != nil {
 		return nodes, err
 	}
 	return append(nodes, children...), nil
 }
 
-func appendTargetChildren(path string, depth int, expanded map[string]struct{}, knownCounts map[string]int) ([]treeNode, error) {
+func appendTargetChildren(path string, depth int, expanded map[string]struct{}, knownCounts map[string]int, knownSessionIDs map[string][]string) ([]treeNode, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
@@ -181,10 +216,11 @@ func appendTargetChildren(path string, depth int, expanded map[string]struct{}, 
 			Expanded:          isExpanded(childPath, expanded),
 			HasChildren:       hasVisibleDirChildren(childPath),
 			KnownSessionCount: knownCounts[childPath],
+			SessionIDs:        knownSessionIDs[childPath],
 		}
 		out = append(out, node)
 		if node.Expanded {
-			children, err := appendTargetChildren(childPath, depth+1, expanded, knownCounts)
+			children, err := appendTargetChildren(childPath, depth+1, expanded, knownCounts, knownSessionIDs)
 			if err != nil {
 				continue
 			}

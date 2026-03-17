@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -486,8 +487,8 @@ func TestEnterOnFilteredTargetScopesTreeAndParentRowReturnsUp(t *testing.T) {
 	mm.targetPane.cursor = 0
 	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	mm = updated.(Model)
-	if got := mm.CurrentTargetFolder(); got != root {
-		t.Fatalf("expected enter on parent row to return to root, got %q", got)
+	if got := mm.CurrentTargetFolder(); got != filepath.Join(root, "alpha") {
+		t.Fatalf("expected enter on parent row to preselect previous folder, got %q", got)
 	}
 }
 
@@ -508,6 +509,154 @@ func TestEnterTargetShowsChildrenImmediately(t *testing.T) {
 	mm = updated.(Model)
 	if !containsPath(targetPaths(mm), filepath.Join(root, "projects", "app1")) {
 		t.Fatalf("expected child folder visible after enter, got %#v", targetPaths(mm))
+	}
+}
+
+func TestEnterParentPreselectsPreviousTargetFolder(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "projects", "app1"))
+	mustMkdirAll(t, filepath.Join(root, "docs"))
+	m := NewModelWithTargetRoot(nil, root)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	mm := updated.(Model)
+	for i, node := range mm.visibleTargetNodes() {
+		if node.Path == filepath.Join(root, "projects") {
+			mm.targetPane.cursor = i
+			break
+		}
+	}
+	if got := mm.CurrentTargetFolder(); got != filepath.Join(root, "projects") {
+		t.Fatalf("expected projects selected before enter, got %q", got)
+	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+
+	// In scoped view, ".." is at top; select it and enter to return to parent.
+	mm.targetPane.cursor = 0
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+	if got := mm.CurrentTargetFolder(); got != filepath.Join(root, "projects") {
+		t.Fatalf("expected previous folder preselected after parent enter, got %q", got)
+	}
+}
+
+func TestEnterOnSessionOpensConversationPopupAndEscCloses(t *testing.T) {
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-03-09T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello\nworld"}]}}`,
+		`{"timestamp":"2026-03-09T10:01:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi there"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(sessionFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	records := []sessionindex.SessionRecord{
+		{SessionID: "s1", SessionFile: sessionFile, SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModelWithTargetRoot(records, t.TempDir())
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm := updated.(Model)
+	if mm.activePanel != panelSessions {
+		t.Fatalf("expected sessions panel active, got %d", mm.activePanel)
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+	if !mm.popupOpen {
+		t.Fatal("expected popup to open on enter in sessions pane")
+	}
+	if len(mm.popupOffsets) < 2 {
+		t.Fatalf("expected popup offsets to include conversation entries, got %#v", mm.popupOffsets)
+	}
+	view := mm.View()
+	if !strings.Contains(view, "Conversation") {
+		t.Fatalf("expected popup view to contain title, got %q", view)
+	}
+	if !strings.Contains(view, "You: hello world") {
+		t.Fatalf("expected normalized user message in popup, got %q", view)
+	}
+
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected esc to close popup, not quit app")
+	}
+	if mm.popupOpen {
+		t.Fatal("expected popup closed on esc")
+	}
+}
+
+func TestPopupScrollsWithDownKey(t *testing.T) {
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		lines = append(lines, fmt.Sprintf(`{"timestamp":"2026-03-09T10:%02d:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"line %d"}]}}`, i%60, i))
+	}
+	if err := os.WriteFile(sessionFile, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	records := []sessionindex.SessionRecord{
+		{SessionID: "s1", SessionFile: sessionFile, SessionMetaCWD: "/repo/src"},
+	}
+	m := NewModelWithTargetRoot(records, t.TempDir())
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm := updated.(Model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+	if !mm.popupOpen {
+		t.Fatal("expected popup to open")
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyDown})
+	mm = updated.(Model)
+	if mm.popupPane.cursor == 0 {
+		t.Fatal("expected popup cursor to move down")
+	}
+}
+
+func TestSourceTreeNodesCarrySessionIDs(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "sid-1", SessionMetaCWD: "/repo/src"},
+		{SessionID: "sid-2", SessionMetaCWD: "/repo/src/sub"},
+	}
+	m := NewModelWithTargetRoot(records, t.TempDir())
+	var found bool
+	for _, node := range m.sourceNodes {
+		if node.Path != "/repo/src" {
+			continue
+		}
+		found = true
+		if len(node.SessionIDs) != 2 {
+			t.Fatalf("expected /repo/src to aggregate 2 session ids, got %#v", node.SessionIDs)
+		}
+	}
+	if !found {
+		t.Fatal("expected /repo/src source node")
+	}
+}
+
+func TestTargetTreeNodesCarryExactPathSessionIDs(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "repo", "src"))
+	records := []sessionindex.SessionRecord{
+		{SessionID: "sid-1", SessionMetaCWD: filepath.Join(root, "repo", "src")},
+	}
+	m := NewModelWithTargetRoot(records, root)
+	m.targetExpanded[filepath.Join(root, "repo")] = struct{}{}
+	m.reloadTargetNodes("")
+	var found bool
+	for _, node := range m.targetNodes {
+		if node.Path != filepath.Join(root, "repo", "src") {
+			continue
+		}
+		found = true
+		if len(node.SessionIDs) != 1 || node.SessionIDs[0] != "sid-1" {
+			t.Fatalf("unexpected target node session ids: %#v", node.SessionIDs)
+		}
+	}
+	if !found {
+		t.Fatalf("expected target node %q", filepath.Join(root, "repo", "src"))
 	}
 }
 

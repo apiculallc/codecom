@@ -1,9 +1,14 @@
 package tui
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,11 +37,12 @@ type Model struct {
 	sessions    []sessionindex.SessionRecord
 	selected    map[string]struct{}
 
-	sourceViewRoot string
-	targetBaseRoot string
-	targetViewRoot string
-	targetExpanded map[string]struct{}
-	knownCounts    map[string]int
+	sourceViewRoot  string
+	targetBaseRoot  string
+	targetViewRoot  string
+	targetExpanded  map[string]struct{}
+	knownCounts     map[string]int
+	knownSessionIDs map[string][]string
 
 	sourcePane   paneState
 	targetPane   paneState
@@ -45,6 +51,12 @@ type Model struct {
 	filterMode   bool
 	sourceFilter string
 	targetFilter string
+	popupOpen    bool
+	popupTitle   string
+	popupSession string
+	popupOffsets []int64
+	popupStatic  []string
+	popupPane    paneState
 	status       string
 	width        int
 	height       int
@@ -57,8 +69,9 @@ func NewModel(records []sessionindex.SessionRecord) Model {
 
 func NewModelWithTargetRoot(records []sessionindex.SessionRecord, targetRoot string) Model {
 	knownCounts := buildKnownSessionCounts(records)
+	knownSessionIDs := buildKnownSessionIDs(records)
 	expanded := map[string]struct{}{filepath.Clean(targetRoot): {}}
-	targetNodes, err := buildTargetNodes(targetRoot, expanded, knownCounts)
+	targetNodes, err := buildTargetNodes(targetRoot, expanded, knownCounts, knownSessionIDs)
 	status := "ready"
 	if err != nil {
 		status = fmt.Sprintf("target root unreadable: %v", err)
@@ -68,19 +81,20 @@ func NewModelWithTargetRoot(records []sessionindex.SessionRecord, targetRoot str
 		}
 	}
 	return Model{
-		sourceNodes:    buildSourceTree(records),
-		targetNodes:    targetNodes,
-		sessions:       records,
-		selected:       make(map[string]struct{}),
-		targetBaseRoot: filepath.Clean(targetRoot),
-		targetViewRoot: filepath.Clean(targetRoot),
-		targetExpanded: expanded,
-		knownCounts:    knownCounts,
-		activePanel:    panelSource,
-		status:         status,
-		width:          defaultWidth,
-		height:         defaultHeight,
-		styles:         newStyles(),
+		sourceNodes:     buildSourceTree(records),
+		targetNodes:     targetNodes,
+		sessions:        records,
+		selected:        make(map[string]struct{}),
+		targetBaseRoot:  filepath.Clean(targetRoot),
+		targetViewRoot:  filepath.Clean(targetRoot),
+		targetExpanded:  expanded,
+		knownCounts:     knownCounts,
+		knownSessionIDs: knownSessionIDs,
+		activePanel:     panelSource,
+		status:          status,
+		width:           defaultWidth,
+		height:          defaultHeight,
+		styles:          newStyles(),
 	}
 }
 
@@ -93,6 +107,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.clampAll()
 	case tea.KeyMsg:
+		if m.popupOpen {
+			return m.updatePopup(msg)
+		}
 		if m.filterMode {
 			return m.updateFilter(msg)
 		}
@@ -207,6 +224,14 @@ func (m Model) SessionsForCurrentSource() []sessionindex.SessionRecord {
 }
 
 func (m Model) View() string {
+	main := m.renderMainView()
+	if !m.popupOpen {
+		return main
+	}
+	return m.renderConversationPopup()
+}
+
+func (m Model) renderMainView() string {
 	w, h := m.dimensions()
 	topH, bottomH := splitHeights(h)
 	colW := max(10, (w-1)/2)
@@ -672,7 +697,7 @@ func (m *Model) expandOrDescendTarget() {
 }
 
 func (m *Model) reloadTargetNodes(statusPrefix string) {
-	nodes, err := buildTargetNodes(m.targetViewRoot, m.targetExpanded, m.knownCounts)
+	nodes, err := buildTargetNodes(m.targetViewRoot, m.targetExpanded, m.knownCounts, m.knownSessionIDs)
 	if err != nil {
 		m.status = strings.TrimSpace(statusPrefix + " target read error: " + err.Error())
 		return
@@ -752,6 +777,8 @@ func (m *Model) enterCurrentNode() {
 		m.enterSourceNode()
 	case panelTarget:
 		m.enterTargetNode()
+	case panelSessions:
+		m.openCurrentSessionConversation()
 	}
 }
 
@@ -761,14 +788,19 @@ func (m *Model) enterSourceNode() {
 		return
 	}
 	node := nodes[m.sourcePane.cursor]
+	previousRoot := m.sourceViewRoot
+	selectPath := ""
 	if node.ParentNav {
 		m.sourceViewRoot = sourceParentRoot(m.sourceNodes, m.sourceViewRoot)
+		selectPath = previousRoot
 	} else {
 		m.sourceViewRoot = node.Path
 	}
 	m.sourceFilter = ""
 	m.filterMode = false
-	m.resetSourcePaneCursor()
+	if selectPath == "" || !m.selectSourcePath(selectPath) {
+		m.resetSourcePaneCursor()
+	}
 	m.sessionPane.cursor = 0
 	m.sessionPane.offset = 0
 	m.clampPane(&m.sessionPane, len(m.SessionsForCurrentSource()), m.sessionViewportHeight())
@@ -781,11 +813,14 @@ func (m *Model) enterTargetNode() {
 		return
 	}
 	node := nodes[m.targetPane.cursor]
+	previousRoot := m.targetViewRoot
+	selectPath := ""
 	if node.ParentNav {
 		if filepath.Clean(m.targetViewRoot) == filepath.Clean(m.targetBaseRoot) {
 			return
 		}
 		m.targetViewRoot = filepath.Dir(m.targetViewRoot)
+		selectPath = previousRoot
 	} else {
 		m.targetViewRoot = node.Path
 	}
@@ -794,8 +829,34 @@ func (m *Model) enterTargetNode() {
 	// Keep MC-style "enter folder" behavior: entered root should show its children immediately.
 	m.targetExpanded[m.targetViewRoot] = struct{}{}
 	m.reloadTargetNodes("")
-	m.resetTargetPaneCursor()
+	if selectPath == "" || !m.selectTargetPath(selectPath) {
+		m.resetTargetPaneCursor()
+	}
 	m.status = fmt.Sprintf("target entered: %s", m.CurrentTargetFolder())
+}
+
+func (m *Model) openCurrentSessionConversation() {
+	rows := m.SessionsForCurrentSource()
+	if len(rows) == 0 || m.sessionPane.cursor < 0 || m.sessionPane.cursor >= len(rows) {
+		m.status = "no session to open"
+		return
+	}
+	row := rows[m.sessionPane.cursor]
+	offsets, err := loadConversationOffsets(row)
+	if err != nil {
+		m.status = fmt.Sprintf("open session failed: %v", err)
+		return
+	}
+	m.popupTitle = row.DisplayLabel()
+	m.popupSession = row.SessionFile
+	m.popupOffsets = offsets
+	m.popupStatic = nil
+	if len(offsets) == 0 {
+		m.popupStatic = []string{"No conversation messages found in this session."}
+	}
+	m.popupPane = paneState{}
+	m.popupOpen = true
+	m.status = "conversation opened"
 }
 
 func (m Model) currentFilter() string {
@@ -859,6 +920,351 @@ func (m Model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.popupOpen = false
+		m.popupTitle = ""
+		m.popupSession = ""
+		m.popupOffsets = nil
+		m.popupStatic = nil
+		m.popupPane = paneState{}
+		m.status = "conversation closed"
+	case "up":
+		m.movePopupCursor(-1)
+	case "down":
+		m.movePopupCursor(1)
+	case "pgup":
+		m.movePopupCursor(-m.popupBodyHeight())
+	case "pgdown":
+		m.movePopupCursor(m.popupBodyHeight())
+	case "home":
+		m.jumpPopupCursor(0)
+	case "end":
+		m.jumpPopupCursor(m.popupLineCount() - 1)
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *Model) movePopupCursor(delta int) {
+	if m.popupLineCount() == 0 {
+		return
+	}
+	m.popupPane.cursor += delta
+	if m.popupPane.cursor < 0 {
+		m.popupPane.cursor = 0
+	}
+	if m.popupPane.cursor >= m.popupLineCount() {
+		m.popupPane.cursor = m.popupLineCount() - 1
+	}
+	m.ensureVisible(&m.popupPane, m.popupBodyHeight())
+}
+
+func (m *Model) jumpPopupCursor(idx int) {
+	if m.popupLineCount() == 0 {
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= m.popupLineCount() {
+		idx = m.popupLineCount() - 1
+	}
+	m.popupPane.cursor = idx
+	m.ensureVisible(&m.popupPane, m.popupBodyHeight())
+}
+
+func (m Model) renderConversationPopup() string {
+	w, h := m.dimensions()
+	popupW := max(40, w-8)
+	popupH := max(12, h-4)
+
+	frame := m.styles.activePane.
+		Width(max(1, popupW-m.styles.activePane.GetHorizontalFrameSize())).
+		Height(max(1, popupH-m.styles.activePane.GetVerticalFrameSize()))
+	title := m.popupTitle
+	if title == "" {
+		title = "Conversation"
+	}
+	header := m.styles.activeTitle.Render(" Conversation: " + truncateRight(title, max(10, popupW-20)) + " ")
+	hint := m.styles.inactiveTitle.Render(" Esc close ")
+	titleLine := lipgloss.JoinHorizontal(lipgloss.Top, header, hint)
+
+	bodyW := max(1, popupW-m.styles.activePane.GetHorizontalFrameSize())
+	bodyH := max(1, popupH-m.styles.activePane.GetVerticalFrameSize()-lipgloss.Height(titleLine))
+	lines := m.popupRenderedLines(bodyW)
+	total := len(lines)
+	rows := make([]string, 0, bodyH)
+	for i := 0; i < bodyH; i++ {
+		idx := m.popupPane.offset + i
+		if idx >= total {
+			rows = append(rows, "")
+			continue
+		}
+		style := m.styles.row
+		switch lines[idx].Speaker {
+		case "You":
+			style = m.styles.popupUserRow
+		case "Assistant":
+			style = m.styles.popupAssistantRow
+		}
+		if idx == m.popupPane.cursor {
+			style = m.styles.selectedActive
+		}
+		rows = append(rows, style.Width(bodyW).Render(lines[idx].Text))
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, strings.Join(rows, "\n"))
+	popup := frame.Render(content)
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, popup)
+}
+
+func (m Model) popupBodyHeight() int {
+	_, h := m.dimensions()
+	popupH := max(12, h-4)
+	return max(1, popupH-m.styles.activePane.GetVerticalFrameSize()-1)
+}
+
+type popupEventLine struct {
+	Timestamp string          `json:"timestamp"`
+	Type      string          `json:"type"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type popupEventPayload struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+type popupResponsePayload struct {
+	Type    string                `json:"type"`
+	Role    string                `json:"role"`
+	Content []popupResponseRecord `json:"content"`
+}
+
+type popupResponseRecord struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type popupParsedLine struct {
+	Text    string
+	Speaker string
+}
+
+type popupRenderedLine struct {
+	Text    string
+	Speaker string
+}
+
+func loadConversationOffsets(r sessionindex.SessionRecord) ([]int64, error) {
+	if r.SessionFile == "" {
+		return nil, fmt.Errorf("missing session file")
+	}
+	f, err := os.Open(r.SessionFile)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	offsets := make([]int64, 0, 64)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 128*1024), 16*1024*1024)
+	var offset int64
+	lastLine := ""
+	for scanner.Scan() {
+		raw := append([]byte(nil), scanner.Bytes()...)
+		if line, ok := parseConversationLine(raw); ok {
+			if line.Text == lastLine {
+				offset += int64(len(scanner.Bytes())) + 1
+				continue
+			}
+			offsets = append(offsets, offset)
+			lastLine = line.Text
+		}
+		offset += int64(len(scanner.Bytes())) + 1
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return offsets, nil
+}
+
+func collapseWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func formatConversationLine(tsRaw, speaker, message string) string {
+	if t, err := time.Parse(time.RFC3339, tsRaw); err == nil {
+		return fmt.Sprintf("%s  %s: %s", t.Format("2006-01-02 15:04"), speaker, message)
+	}
+	return fmt.Sprintf("%s: %s", speaker, message)
+}
+
+func (m Model) popupLineCount() int {
+	return len(m.popupRenderedLines(m.popupBodyWidth()))
+}
+
+func (m Model) popupBodyWidth() int {
+	w, _ := m.dimensions()
+	popupW := max(40, w-8)
+	return max(1, popupW-m.styles.activePane.GetHorizontalFrameSize())
+}
+
+func (m Model) popupRenderedLines(width int) []popupRenderedLine {
+	raw := make([]popupParsedLine, 0, 128)
+	if len(m.popupStatic) > 0 {
+		for _, line := range m.popupStatic {
+			raw = append(raw, popupParsedLine{Text: line})
+		}
+	} else {
+		for _, off := range m.popupOffsets {
+			line, err := readConversationLineAt(m.popupSession, off)
+			if err != nil || line.Text == "" {
+				raw = append(raw, popupParsedLine{Text: "<unavailable>"})
+				continue
+			}
+			raw = append(raw, line)
+		}
+	}
+	out := make([]popupRenderedLine, 0, len(raw))
+	for _, line := range raw {
+		for _, chunk := range wrapLine(line.Text, width) {
+			out = append(out, popupRenderedLine{Text: chunk, Speaker: line.Speaker})
+		}
+	}
+	if len(out) == 0 {
+		return []popupRenderedLine{{Text: ""}}
+	}
+	return out
+}
+
+func readConversationLineAt(path string, offset int64) (popupParsedLine, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return popupParsedLine{}, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return popupParsedLine{}, err
+	}
+	reader := bufio.NewReader(f)
+	raw, err := reader.ReadBytes('\n')
+	if err != nil && err != io.EOF {
+		return popupParsedLine{}, err
+	}
+	line, ok := parseConversationLine(raw)
+	if !ok {
+		return popupParsedLine{}, nil
+	}
+	return line, nil
+}
+
+func parseConversationLine(raw []byte) (popupParsedLine, bool) {
+	var ev popupEventLine
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		return popupParsedLine{}, false
+	}
+	lineType := ev.Type
+	if lineType == "" {
+		lineType = ev.EventType
+	}
+	switch lineType {
+	case "response_item":
+		var payload popupResponsePayload
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			return popupParsedLine{}, false
+		}
+		if payload.Type != "message" {
+			return popupParsedLine{}, false
+		}
+		prefix := ""
+		switch payload.Role {
+		case "user":
+			prefix = "You"
+		case "assistant":
+			prefix = "Assistant"
+		default:
+			return popupParsedLine{}, false
+		}
+		parts := make([]string, 0, len(payload.Content))
+		for _, c := range payload.Content {
+			switch c.Type {
+			case "input_text", "output_text", "text":
+				text := collapseWhitespace(c.Text)
+				if text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		if len(parts) == 0 {
+			return popupParsedLine{}, false
+		}
+		return popupParsedLine{Text: formatConversationLine(ev.Timestamp, prefix, strings.Join(parts, " ")), Speaker: prefix}, true
+	case "event_msg":
+		var payload popupEventPayload
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			return popupParsedLine{}, false
+		}
+		prefix := ""
+		switch payload.Type {
+		case "user_message":
+			prefix = "You"
+		case "assistant_message", "agent_message":
+			prefix = "Assistant"
+		default:
+			return popupParsedLine{}, false
+		}
+		msg := collapseWhitespace(payload.Message)
+		if msg == "" {
+			return popupParsedLine{}, false
+		}
+		return popupParsedLine{Text: formatConversationLine(ev.Timestamp, prefix, msg), Speaker: prefix}, true
+	default:
+		return popupParsedLine{}, false
+	}
+}
+
+func wrapLine(s string, width int) []string {
+	if width <= 1 {
+		return []string{truncateRight(s, max(1, width))}
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	lines := make([]string, 0, 2)
+	cur := ""
+	for _, w := range words {
+		word := w
+		for len([]rune(word)) > width {
+			chunk := string([]rune(word)[:width])
+			word = string([]rune(word)[width:])
+			if cur != "" {
+				lines = append(lines, cur)
+				cur = ""
+			}
+			lines = append(lines, chunk)
+		}
+		if cur == "" {
+			cur = word
+			continue
+		}
+		if len([]rune(cur))+1+len([]rune(word)) <= width {
+			cur += " " + word
+		} else {
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 func scopeSourceNodes(nodes []treeNode, viewRoot string) []treeNode {
@@ -944,6 +1350,30 @@ func (m *Model) resetTargetPaneCursor() {
 	m.clampPane(&m.targetPane, len(m.visibleTargetNodes()), m.topViewportHeight())
 }
 
+func (m *Model) selectSourcePath(path string) bool {
+	nodes := m.visibleSourceNodes()
+	for i, node := range nodes {
+		if node.Path == path && !node.ParentNav {
+			m.sourcePane.cursor = i
+			m.ensureVisible(&m.sourcePane, m.topViewportHeight())
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) selectTargetPath(path string) bool {
+	nodes := m.visibleTargetNodes()
+	for i, node := range nodes {
+		if node.Path == path && !node.ParentNav {
+			m.targetPane.cursor = i
+			m.ensureVisible(&m.targetPane, m.topViewportHeight())
+			return true
+		}
+	}
+	return false
+}
+
 func nextPanel(current int) int {
 	switch current {
 	case panelSource:
@@ -978,20 +1408,22 @@ type palette struct {
 }
 
 type styles struct {
-	colors           palette
-	activePane       lipgloss.Style
-	inactivePane     lipgloss.Style
-	activeTitle      lipgloss.Style
-	inactiveTitle    lipgloss.Style
-	row              lipgloss.Style
-	markedRow        lipgloss.Style
-	orphanRow        lipgloss.Style
-	selectedActive   lipgloss.Style
-	selectedInactive lipgloss.Style
-	statusBar        lipgloss.Style
-	keyBar           lipgloss.Style
-	keyCap           lipgloss.Style
-	keyLabel         lipgloss.Style
+	colors            palette
+	activePane        lipgloss.Style
+	inactivePane      lipgloss.Style
+	activeTitle       lipgloss.Style
+	inactiveTitle     lipgloss.Style
+	row               lipgloss.Style
+	popupUserRow      lipgloss.Style
+	popupAssistantRow lipgloss.Style
+	markedRow         lipgloss.Style
+	orphanRow         lipgloss.Style
+	selectedActive    lipgloss.Style
+	selectedInactive  lipgloss.Style
+	statusBar         lipgloss.Style
+	keyBar            lipgloss.Style
+	keyCap            lipgloss.Style
+	keyLabel          lipgloss.Style
 }
 
 func newStyles() styles {
@@ -1013,19 +1445,21 @@ func newStyles() styles {
 	activePane := basePane.Copy().BorderForeground(p.accent)
 	inactivePane := basePane.Copy().BorderForeground(p.chromeBG)
 	return styles{
-		colors:           p,
-		activePane:       activePane,
-		inactivePane:     inactivePane,
-		activeTitle:      lipgloss.NewStyle().Background(p.accent).Foreground(p.selectFG).Bold(true),
-		inactiveTitle:    lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Bold(true),
-		row:              lipgloss.NewStyle().Background(p.paneBG).Foreground(p.text),
-		markedRow:        lipgloss.NewStyle().Background(p.paneBG).Foreground(p.accent).Bold(true),
-		orphanRow:        lipgloss.NewStyle().Background(p.paneBG).Foreground(p.orphan),
-		selectedActive:   lipgloss.NewStyle().Background(p.selectBG).Foreground(p.selectFG).Bold(true),
-		selectedInactive: lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Bold(true),
-		statusBar:        lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text),
-		keyBar:           lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text),
-		keyCap:           lipgloss.NewStyle().Background(p.text).Foreground(p.selectFG).Bold(true).Padding(0, 1),
-		keyLabel:         lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Padding(0, 1),
+		colors:            p,
+		activePane:        activePane,
+		inactivePane:      inactivePane,
+		activeTitle:       lipgloss.NewStyle().Background(p.accent).Foreground(p.selectFG).Bold(true),
+		inactiveTitle:     lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Bold(true),
+		row:               lipgloss.NewStyle().Background(p.paneBG).Foreground(p.text),
+		popupUserRow:      lipgloss.NewStyle().Background(lipgloss.Color("18")).Foreground(p.text),
+		popupAssistantRow: lipgloss.NewStyle().Background(lipgloss.Color("19")).Foreground(p.text),
+		markedRow:         lipgloss.NewStyle().Background(p.paneBG).Foreground(p.accent).Bold(true),
+		orphanRow:         lipgloss.NewStyle().Background(p.paneBG).Foreground(p.orphan),
+		selectedActive:    lipgloss.NewStyle().Background(p.selectBG).Foreground(p.selectFG).Bold(true),
+		selectedInactive:  lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Bold(true),
+		statusBar:         lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text),
+		keyBar:            lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text),
+		keyCap:            lipgloss.NewStyle().Background(p.text).Foreground(p.selectFG).Bold(true).Padding(0, 1),
+		keyLabel:          lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Padding(0, 1),
 	}
 }

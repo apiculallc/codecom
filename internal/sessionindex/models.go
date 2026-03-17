@@ -14,6 +14,10 @@ type SessionRecord struct {
 	SessionFile      string
 	SessionMetaCWD   string
 	TurnContextCWD   []string
+	SQLiteThreadID   string
+	SQLiteThreadCWD  string
+	SQLiteRollout    string
+	SQLiteMatched    bool
 	FirstUserMessage string
 	LastUserMessage  string
 	LastActivity     time.Time

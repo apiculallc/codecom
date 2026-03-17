@@ -30,6 +30,7 @@ func Scan(codexRoot string) (ScanResult, error) {
 		res.Sessions = append(res.Sessions, rec)
 		res.Warnings = append(res.Warnings, warnings...)
 	}
+	res.Warnings = append(res.Warnings, attachSQLiteThreads(codexRoot, res.Sessions)...)
 
 	ApplyOrphanStatus(res.Sessions, 0)
 	SortSessions(res.Sessions)
