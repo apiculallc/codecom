@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	mv "codecom/internal/move"
+	"codecom/internal/search"
 	"codecom/internal/sessionindex"
 )
 
@@ -35,6 +36,18 @@ type paneState struct {
 type scanFunc func(string) (sessionindex.ScanResult, error)
 type buildPlanFunc func(string, string, []sessionindex.SessionRecord) (mv.Plan, error)
 type executePlanFunc func(string, mv.Plan) (mv.ExecuteResult, error)
+type buildSearchIndexFunc func(string, []sessionindex.SessionRecord) (search.Backend, error)
+
+type searchBuildDoneMsg struct {
+	backend search.Backend
+	err     error
+}
+
+type searchResultMsg struct {
+	result search.Result
+	err    error
+	query  string
+}
 
 type Model struct {
 	sourceNodes []treeNode
@@ -64,8 +77,20 @@ type Model struct {
 	popupTitle      string
 	popupSession    string
 	popupOffsets    []int64
+	popupHitOffsets map[int64]struct{}
 	popupStatic     []string
 	popupPane       paneState
+
+	searchBuild      buildSearchIndexFunc
+	searchBackend    search.Backend
+	searchMode       bool
+	searchQuery      string
+	searchBuilding   bool
+	searchReady      bool
+	searchSessionSet map[string]struct{}
+	searchFolderSet  map[string]struct{}
+	searchOffsets    map[string][]int64
+
 	moveConfirmOpen bool
 	status          string
 	width           int
@@ -91,32 +116,69 @@ func NewModelWithTargetRoot(records []sessionindex.SessionRecord, targetRoot str
 		}
 	}
 	return Model{
-		sourceNodes:     buildSourceTree(records),
-		targetNodes:     targetNodes,
-		sessions:        records,
-		selected:        make(map[string]struct{}),
-		targetBaseRoot:  filepath.Clean(targetRoot),
-		targetViewRoot:  filepath.Clean(targetRoot),
-		targetExpanded:  expanded,
-		knownCounts:     knownCounts,
-		knownSessionIDs: knownSessionIDs,
-		scanSessions:    sessionindex.Scan,
-		buildPlan:       mv.BuildPlan,
-		executePlan:     mv.ExecutePlan,
-		activePanel:     panelSource,
-		status:          status,
-		width:           defaultWidth,
-		height:          defaultHeight,
-		styles:          newStyles(),
+		sourceNodes:      buildSourceTree(records),
+		targetNodes:      targetNodes,
+		sessions:         records,
+		selected:         make(map[string]struct{}),
+		targetBaseRoot:   filepath.Clean(targetRoot),
+		targetViewRoot:   filepath.Clean(targetRoot),
+		targetExpanded:   expanded,
+		knownCounts:      knownCounts,
+		knownSessionIDs:  knownSessionIDs,
+		scanSessions:     sessionindex.Scan,
+		buildPlan:        mv.BuildPlan,
+		executePlan:      mv.ExecutePlan,
+		searchBuild:      search.BuildSQLiteIndex,
+		activePanel:      panelSource,
+		status:           status,
+		width:            defaultWidth,
+		height:           defaultHeight,
+		styles:           newStyles(),
+		searchSessionSet: make(map[string]struct{}),
+		searchFolderSet:  make(map[string]struct{}),
+		searchOffsets:    make(map[string][]int64),
 	}
 }
 
 func (m Model) WithCodexRoot(root string) Model {
 	m.codexRoot = filepath.Clean(root)
+	if m.codexRoot != "" && m.codexRoot != "." && m.searchBuild != nil {
+		m.searchBuilding = true
+	}
 	return m
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd {
+	if m.codexRoot == "" || m.codexRoot == "." || m.searchBuild == nil {
+		return nil
+	}
+	return m.buildSearchIndexCmd()
+}
+
+func (m Model) buildSearchIndexCmd() tea.Cmd {
+	if m.codexRoot == "" || m.codexRoot == "." || m.searchBuild == nil {
+		return nil
+	}
+	records := append([]sessionindex.SessionRecord(nil), m.sessions...)
+	root := m.codexRoot
+	build := m.searchBuild
+	return func() tea.Msg {
+		backend, err := build(root, records)
+		return searchBuildDoneMsg{backend: backend, err: err}
+	}
+}
+
+func (m Model) searchQueryCmd(query string) tea.Cmd {
+	if m.searchBackend == nil {
+		return nil
+	}
+	backend := m.searchBackend
+	q := query
+	return func() tea.Msg {
+		res, err := backend.Search(q)
+		return searchResultMsg{result: res, err: err, query: q}
+	}
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -124,6 +186,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.clampAll()
+	case searchBuildDoneMsg:
+		m.searchBuilding = false
+		if msg.err != nil {
+			m.searchReady = false
+			m.status = fmt.Sprintf("search index unavailable: %v", msg.err)
+			return m, nil
+		}
+		if m.searchBackend != nil {
+			_ = m.searchBackend.Close()
+		}
+		m.searchBackend = msg.backend
+		m.searchReady = true
+		m.status = "search index ready"
+		if m.searchQuery != "" {
+			return m, m.searchQueryCmd(m.searchQuery)
+		}
+		m.clampAll()
+		return m, nil
+	case searchResultMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("search failed: %v", msg.err)
+			return m, nil
+		}
+		if msg.query != m.searchQuery {
+			return m, nil
+		}
+		m.searchSessionSet = msg.result.SessionIDs
+		m.searchFolderSet = msg.result.FolderPaths
+		m.searchOffsets = msg.result.OffsetsBySessionID
+		m.clampAll()
+		m.status = fmt.Sprintf("search results: %d session(s)", len(m.searchSessionSet))
+		return m, nil
 	case tea.KeyMsg:
 		if m.moveConfirmOpen {
 			return m.updateMoveConfirm(msg)
@@ -131,12 +225,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.popupOpen {
 			return m.updatePopup(msg)
 		}
+		if m.searchMode {
+			return m.updateSearch(msg)
+		}
 		if m.filterMode {
 			return m.updateFilter(msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
+		case "ctrl+f":
+			m.enterSearchMode()
 		case "/":
 			m.enterFilterMode()
 		case "tab":
@@ -163,6 +262,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.enterCurrentNode()
 		case "f5":
 			m.refreshFromDisk()
+			if cmd := m.buildSearchIndexCmd(); cmd != nil {
+				m.searchBuilding = true
+				return m, cmd
+			}
 		case "f6":
 			m.openMoveConfirmation()
 		case "space", " ":
@@ -238,10 +341,19 @@ func (m Model) SessionsForCurrentSource() []sessionindex.SessionRecord {
 	for _, s := range m.sessions {
 		cwd := filepath.Clean(s.EffectiveCWD())
 		if cwd == sourceClean || strings.HasPrefix(cwd+string(filepath.Separator), sourcePrefix) {
+			if m.searchActive() {
+				if _, ok := m.searchSessionSet[s.SessionID]; !ok {
+					continue
+				}
+			}
 			out = append(out, s)
 		}
 	}
 	return out
+}
+
+func (m Model) searchActive() bool {
+	return strings.TrimSpace(m.searchQuery) != ""
 }
 
 func (m Model) View() string {
@@ -266,8 +378,19 @@ func (m Model) renderMainView() string {
 	top := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	bottom := m.renderSessionsPane(colW+rightW, bottomH, m.activePanel == panelSessions)
 	statusText := fmt.Sprintf("Status: %s | Selected: %d", m.status, m.SelectedCount())
+	if m.searchBuilding {
+		statusText = fmt.Sprintf("%s | Search: indexing", statusText)
+	} else if m.searchReady {
+		statusText = fmt.Sprintf("%s | Search: ready", statusText)
+	}
+	if m.searchActive() {
+		statusText = fmt.Sprintf("%s | Query: %s", statusText, m.searchQuery)
+	}
 	if m.filterMode {
 		statusText = fmt.Sprintf("%s | Filter: %s", statusText, m.currentFilter())
+	}
+	if m.searchMode {
+		statusText = fmt.Sprintf("%s | Search input", statusText)
 	}
 	status := m.styles.statusBar.Render(padRight(truncateRight(statusText, colW+rightW), colW+rightW))
 	keys := m.renderKeyBar(colW + rightW)
@@ -875,11 +998,45 @@ func (m *Model) reloadTargetNodes(statusPrefix string) {
 }
 
 func (m Model) visibleSourceNodes() []treeNode {
-	return filterTreeNodes(scopeSourceNodes(m.sourceNodes, m.sourceViewRoot), m.sourceFilter)
+	nodes := scopeSourceNodes(m.sourceNodes, m.sourceViewRoot)
+	nodes = pruneSourceNodesByMatches(nodes, m.searchFolderSet, m.searchActive())
+	return filterTreeNodes(nodes, m.sourceFilter)
 }
 
 func (m Model) visibleTargetNodes() []treeNode {
 	return filterTreeNodes(scopeTargetNodes(m.targetNodes, m.targetBaseRoot, m.targetViewRoot), m.targetFilter)
+}
+
+func pruneSourceNodesByMatches(nodes []treeNode, folders map[string]struct{}, enabled bool) []treeNode {
+	if !enabled || len(folders) == 0 {
+		return nodes
+	}
+	out := make([]treeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if node.ParentNav {
+			out = append(out, node)
+			continue
+		}
+		if sourceNodeContainsMatch(node.Path, folders) {
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
+func sourceNodeContainsMatch(path string, folders map[string]struct{}) bool {
+	clean := filepath.Clean(path)
+	for folder := range folders {
+		f := filepath.Clean(folder)
+		if clean == f {
+			return true
+		}
+		prefix := clean + string(filepath.Separator)
+		if strings.HasPrefix(f+string(filepath.Separator), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func filterTreeNodes(nodes []treeNode, query string) []treeNode {
@@ -934,6 +1091,15 @@ func (m *Model) enterFilterMode() {
 	} else {
 		m.status = fmt.Sprintf("filter: %s", m.currentFilter())
 	}
+}
+
+func (m *Model) enterSearchMode() {
+	m.searchMode = true
+	if m.searchQuery == "" {
+		m.status = "search: type query, enter to apply, esc to clear"
+		return
+	}
+	m.status = fmt.Sprintf("search: %s", m.searchQuery)
 }
 
 func (m *Model) enterCurrentNode() {
@@ -1015,12 +1181,28 @@ func (m *Model) openCurrentSessionConversation() {
 	m.popupTitle = row.DisplayLabel()
 	m.popupSession = row.SessionFile
 	m.popupOffsets = offsets
+	m.popupHitOffsets = nil
 	m.popupStatic = nil
 	if len(offsets) == 0 {
 		m.popupStatic = []string{"No conversation messages found in this session."}
 	}
 	m.popupPane = paneState{}
 	m.popupOpen = true
+	if m.searchActive() {
+		if hits, ok := m.searchOffsets[row.SessionID]; ok && len(hits) > 0 {
+			m.popupHitOffsets = make(map[int64]struct{}, len(hits))
+			for _, off := range hits {
+				m.popupHitOffsets[off] = struct{}{}
+			}
+			lines := m.popupRenderedLines(m.popupBodyWidth())
+			for i, line := range lines {
+				if line.Match {
+					m.jumpPopupCursor(i)
+					break
+				}
+			}
+		}
+	}
 	m.status = "conversation opened"
 }
 
@@ -1031,6 +1213,10 @@ func (m Model) currentFilter() string {
 	default:
 		return m.sourceFilter
 	}
+}
+
+func (m Model) currentSearchQuery() string {
+	return m.searchQuery
 }
 
 func (m *Model) setCurrentFilter(query string) {
@@ -1045,6 +1231,10 @@ func (m *Model) setCurrentFilter(query string) {
 		m.sessionPane.offset = 0
 		m.clampPane(&m.sessionPane, len(m.SessionsForCurrentSource()), m.sessionViewportHeight())
 	}
+}
+
+func (m *Model) setSearchQuery(query string) {
+	m.searchQuery = query
 }
 
 func (m Model) currentFilterForTitle(title string) string {
@@ -1087,6 +1277,45 @@ func (m Model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.setSearchQuery("")
+		m.searchMode = false
+		m.searchSessionSet = make(map[string]struct{})
+		m.searchFolderSet = make(map[string]struct{})
+		m.searchOffsets = make(map[string][]int64)
+		m.clampAll()
+		m.status = "search cleared"
+		return m, nil
+	case "enter":
+		m.searchMode = false
+		if strings.TrimSpace(m.currentSearchQuery()) == "" {
+			m.status = "search closed"
+			return m, nil
+		}
+		if !m.searchReady || m.searchBackend == nil {
+			m.status = "search index not ready"
+			return m, nil
+		}
+		return m, m.searchQueryCmd(m.currentSearchQuery())
+	case "backspace", "ctrl+h":
+		q := m.currentSearchQuery()
+		if q != "" {
+			r := []rune(q)
+			m.setSearchQuery(string(r[:len(r)-1]))
+		}
+		m.status = fmt.Sprintf("search: %s", m.currentSearchQuery())
+		return m, nil
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.setSearchQuery(m.currentSearchQuery() + string(msg.Runes))
+			m.status = fmt.Sprintf("search: %s", m.currentSearchQuery())
+		}
+		return m, nil
+	}
+}
+
 func (m Model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -1094,6 +1323,7 @@ func (m Model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.popupTitle = ""
 		m.popupSession = ""
 		m.popupOffsets = nil
+		m.popupHitOffsets = nil
 		m.popupStatic = nil
 		m.popupPane = paneState{}
 		m.status = "conversation closed"
@@ -1179,6 +1409,8 @@ func (m Model) renderConversationPopup() string {
 		}
 		if idx == m.popupPane.cursor {
 			style = m.styles.selectedActive
+		} else if lines[idx].Match {
+			style = m.styles.searchHitRow
 		}
 		rows = append(rows, style.Width(bodyW).Render(lines[idx].Text))
 	}
@@ -1219,11 +1451,13 @@ type popupResponseRecord struct {
 type popupParsedLine struct {
 	Text    string
 	Speaker string
+	Match   bool
 }
 
 type popupRenderedLine struct {
 	Text    string
 	Speaker string
+	Match   bool
 }
 
 func loadConversationOffsets(r sessionindex.SessionRecord) ([]int64, error) {
@@ -1293,13 +1527,16 @@ func (m Model) popupRenderedLines(width int) []popupRenderedLine {
 				raw = append(raw, popupParsedLine{Text: "<unavailable>"})
 				continue
 			}
+			if _, ok := m.popupHitOffsets[off]; ok {
+				line.Match = true
+			}
 			raw = append(raw, line)
 		}
 	}
 	out := make([]popupRenderedLine, 0, len(raw))
 	for _, line := range raw {
 		for _, chunk := range wrapLine(line.Text, width) {
-			out = append(out, popupRenderedLine{Text: chunk, Speaker: line.Speaker})
+			out = append(out, popupRenderedLine{Text: chunk, Speaker: line.Speaker, Match: line.Match})
 		}
 	}
 	if len(out) == 0 {
@@ -1581,6 +1818,7 @@ type styles struct {
 	row               lipgloss.Style
 	popupUserRow      lipgloss.Style
 	popupAssistantRow lipgloss.Style
+	searchHitRow      lipgloss.Style
 	markedRow         lipgloss.Style
 	orphanRow         lipgloss.Style
 	selectedActive    lipgloss.Style
@@ -1618,6 +1856,7 @@ func newStyles() styles {
 		row:               lipgloss.NewStyle().Background(p.paneBG).Foreground(p.text),
 		popupUserRow:      lipgloss.NewStyle().Background(lipgloss.Color("18")).Foreground(p.text),
 		popupAssistantRow: lipgloss.NewStyle().Background(lipgloss.Color("19")).Foreground(p.text),
+		searchHitRow:      lipgloss.NewStyle().Background(lipgloss.Color("22")).Foreground(p.text).Bold(true),
 		markedRow:         lipgloss.NewStyle().Background(p.paneBG).Foreground(p.accent).Bold(true),
 		orphanRow:         lipgloss.NewStyle().Background(p.paneBG).Foreground(p.orphan),
 		selectedActive:    lipgloss.NewStyle().Background(p.selectBG).Foreground(p.selectFG).Bold(true),

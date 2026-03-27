@@ -8,9 +8,23 @@ import (
 	"testing"
 
 	mv "codecom/internal/move"
+	"codecom/internal/search"
 	"codecom/internal/sessionindex"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+type fakeSearchBackend struct {
+	result  search.Result
+	err     error
+	queries []string
+}
+
+func (b *fakeSearchBackend) Search(query string) (search.Result, error) {
+	b.queries = append(b.queries, query)
+	return b.result, b.err
+}
+
+func (b *fakeSearchBackend) Close() error { return nil }
 
 func TestNewModelAndCurrentSource(t *testing.T) {
 	records := []sessionindex.SessionRecord{
@@ -91,7 +105,7 @@ func TestFitPathLabelUsesMiddleEllipsisOnlyWhenNeeded(t *testing.T) {
 func TestViewContainsPaneHeadersAndKeys(t *testing.T) {
 	m := NewModelWithTargetRoot(nil, t.TempDir())
 	view := m.View()
-	for _, expected := range []string{"Source", "Target", "Sessions", "F5", "refresh", "F6", "move", "/", "filter", "Enter", "open", "Status:"} {
+	for _, expected := range []string{"Source", "Target", "Sessions", "Ctrl+F", "search", "F5", "refresh", "/", "filter", "Enter", "open", "Status:"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("view missing %q: %q", expected, view)
 		}
@@ -584,6 +598,85 @@ func TestFilterIgnoredInSessionsPane(t *testing.T) {
 	}
 }
 
+func TestCtrlFSearchFiltersSourceAndSessions(t *testing.T) {
+	records := []sessionindex.SessionRecord{
+		{SessionID: "sid-a", SessionFile: "/tmp/a.jsonl", SessionMetaCWD: "/repo/a"},
+		{SessionID: "sid-b", SessionFile: "/tmp/b.jsonl", SessionMetaCWD: "/repo/b"},
+	}
+	m := NewModelWithTargetRoot(records, t.TempDir())
+	fake := &fakeSearchBackend{
+		result: search.Result{
+			SessionIDs: map[string]struct{}{
+				"sid-a": {},
+			},
+			FolderPaths: map[string]struct{}{
+				"/repo/a": {},
+			},
+			OffsetsBySessionID: map[string][]int64{
+				"sid-a": {10},
+			},
+		},
+	}
+	m.searchBackend = fake
+	m.searchReady = true
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	mm := updated.(Model)
+	if !mm.searchMode {
+		t.Fatal("expected search mode after ctrl+f")
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	mm = updated.(Model)
+	if mm.searchQuery != "a" {
+		t.Fatalf("expected search query to update, got %q", mm.searchQuery)
+	}
+
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected search command on enter")
+	}
+	msg := cmd()
+	updated, _ = mm.Update(msg)
+	mm = updated.(Model)
+
+	if len(fake.queries) != 1 || fake.queries[0] != "a" {
+		t.Fatalf("unexpected backend queries: %#v", fake.queries)
+	}
+	nodes := mm.visibleSourceNodes()
+	if len(nodes) != 2 || nodes[0].Path != "/repo" || nodes[1].Path != "/repo/a" {
+		t.Fatalf("unexpected filtered source nodes: %#v", nodes)
+	}
+	rows := mm.SessionsForCurrentSource()
+	if len(rows) != 1 || rows[0].SessionID != "sid-a" {
+		t.Fatalf("expected only matching session in pane, got %#v", rows)
+	}
+}
+
+func TestSearchEscClearsSearchState(t *testing.T) {
+	m := NewModelWithTargetRoot([]sessionindex.SessionRecord{
+		{SessionID: "sid-a", SessionMetaCWD: "/repo/a"},
+	}, t.TempDir())
+	m.searchQuery = "abc"
+	m.searchMode = true
+	m.searchSessionSet = map[string]struct{}{"sid-a": {}}
+	m.searchFolderSet = map[string]struct{}{"/repo/a": {}}
+	m.searchOffsets = map[string][]int64{"sid-a": {1}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm := updated.(Model)
+	if mm.searchMode {
+		t.Fatal("expected search mode closed")
+	}
+	if mm.searchQuery != "" {
+		t.Fatalf("expected search query cleared, got %q", mm.searchQuery)
+	}
+	if len(mm.searchSessionSet) != 0 || len(mm.searchFolderSet) != 0 || len(mm.searchOffsets) != 0 {
+		t.Fatalf("expected search caches cleared, got sessions=%d folders=%d offsets=%d", len(mm.searchSessionSet), len(mm.searchFolderSet), len(mm.searchOffsets))
+	}
+}
+
 func TestEnterOnFilteredSourceScopesTreeAndAddsParentRow(t *testing.T) {
 	records := []sessionindex.SessionRecord{
 		{SessionID: "a", SessionMetaCWD: "/repo/project-alpha"},
@@ -771,6 +864,55 @@ func TestPopupScrollsWithDownKey(t *testing.T) {
 	mm = updated.(Model)
 	if mm.popupPane.cursor == 0 {
 		t.Fatal("expected popup cursor to move down")
+	}
+}
+
+func TestPopupSearchHitAutoScrollAndHighlight(t *testing.T) {
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-03-09T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}}`,
+		`{"timestamp":"2026-03-09T10:01:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(sessionFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := sessionindex.SessionRecord{SessionID: "sid-1", SessionFile: sessionFile, SessionMetaCWD: "/repo/src"}
+	offsets, err := loadConversationOffsets(rec)
+	if err != nil {
+		t.Fatalf("loadConversationOffsets error: %v", err)
+	}
+	if len(offsets) < 2 {
+		t.Fatalf("expected at least 2 offsets, got %#v", offsets)
+	}
+
+	m := NewModelWithTargetRoot([]sessionindex.SessionRecord{rec}, t.TempDir())
+	m.searchQuery = "second"
+	m.searchSessionSet = map[string]struct{}{"sid-1": {}}
+	m.searchOffsets = map[string][]int64{"sid-1": {offsets[1]}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mm := updated.(Model)
+	if mm.activePanel != panelSessions {
+		t.Fatalf("expected sessions panel active, got %d", mm.activePanel)
+	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(Model)
+	if !mm.popupOpen {
+		t.Fatal("expected popup open")
+	}
+
+	lines := mm.popupRenderedLines(mm.popupBodyWidth())
+	firstMatch := -1
+	for i, line := range lines {
+		if line.Match {
+			firstMatch = i
+			break
+		}
+	}
+	if firstMatch < 0 {
+		t.Fatal("expected a highlighted match line")
+	}
+	if mm.popupPane.cursor != firstMatch {
+		t.Fatalf("expected popup cursor on first match line %d, got %d", firstMatch, mm.popupPane.cursor)
 	}
 }
 

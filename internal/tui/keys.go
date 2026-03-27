@@ -8,6 +8,7 @@ type KeyHint struct {
 var KeyHints = []KeyHint{
 	{Key: "Tab", Label: "panel"},
 	{Key: "Arrows", Label: "nav"},
+	{Key: "Ctrl+F", Label: "search"},
 	{Key: "/", Label: "filter"},
 	{Key: "Enter", Label: "open"},
 	{Key: "PgUp/PgDn", Label: "page"},
