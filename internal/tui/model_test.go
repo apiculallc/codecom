@@ -11,6 +11,7 @@ import (
 	"codecom/internal/search"
 	"codecom/internal/sessionindex"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type fakeSearchBackend struct {
@@ -117,6 +118,14 @@ func TestUpdateQuitKeyReturnsQuitCmd(t *testing.T) {
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
 		t.Fatal("expected quit command on q key")
+	}
+}
+
+func TestEscQuitsWhenSearchNotActive(t *testing.T) {
+	m := NewModelWithTargetRoot(nil, t.TempDir())
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected quit command on esc without active search")
 	}
 }
 
@@ -644,6 +653,9 @@ func TestCtrlFSearchFiltersSourceAndSessions(t *testing.T) {
 	if len(fake.queries) != 1 || fake.queries[0] != "a" {
 		t.Fatalf("unexpected backend queries: %#v", fake.queries)
 	}
+	if mm.searchMode {
+		t.Fatal("expected search mode to close after enter")
+	}
 	nodes := mm.visibleSourceNodes()
 	if len(nodes) != 2 || nodes[0].Path != "/repo" || nodes[1].Path != "/repo/a" {
 		t.Fatalf("unexpected filtered source nodes: %#v", nodes)
@@ -651,6 +663,12 @@ func TestCtrlFSearchFiltersSourceAndSessions(t *testing.T) {
 	rows := mm.SessionsForCurrentSource()
 	if len(rows) != 1 || rows[0].SessionID != "sid-a" {
 		t.Fatalf("expected only matching session in pane, got %#v", rows)
+	}
+	view := mm.View()
+	for _, expected := range []string{"Source | Search: a", "Target | Search: a", "Sessions | Search: a"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("expected search header marker %q in view: %q", expected, view)
+		}
 	}
 }
 
@@ -674,6 +692,62 @@ func TestSearchEscClearsSearchState(t *testing.T) {
 	}
 	if len(mm.searchSessionSet) != 0 || len(mm.searchFolderSet) != 0 || len(mm.searchOffsets) != 0 {
 		t.Fatalf("expected search caches cleared, got sessions=%d folders=%d offsets=%d", len(mm.searchSessionSet), len(mm.searchFolderSet), len(mm.searchOffsets))
+	}
+}
+
+func TestEscClearsActiveSearchBeforeQuit(t *testing.T) {
+	m := NewModelWithTargetRoot([]sessionindex.SessionRecord{
+		{SessionID: "sid-a", SessionMetaCWD: "/repo/a"},
+	}, t.TempDir())
+	m.searchQuery = "abc"
+	m.searchSessionSet = map[string]struct{}{"sid-a": {}}
+	m.searchFolderSet = map[string]struct{}{"/repo/a": {}}
+	m.searchOffsets = map[string][]int64{"sid-a": {1}}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected esc to clear active search, not quit")
+	}
+	if mm.searchQuery != "" || len(mm.searchSessionSet) != 0 || len(mm.searchFolderSet) != 0 || len(mm.searchOffsets) != 0 {
+		t.Fatalf("expected search state cleared, got query=%q sessions=%d folders=%d offsets=%d", mm.searchQuery, len(mm.searchSessionSet), len(mm.searchFolderSet), len(mm.searchOffsets))
+	}
+}
+
+func TestCtrlFShowsSearchModal(t *testing.T) {
+	m := NewModelWithTargetRoot([]sessionindex.SessionRecord{{SessionID: "sid-a", SessionMetaCWD: "/repo/a"}}, t.TempDir())
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	mm := updated.(Model)
+	if !mm.searchMode {
+		t.Fatal("expected search mode")
+	}
+	view := mm.View()
+	for _, expected := range []string{"Search", "Query:", "Enter submit, Esc clear"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("expected modal content %q in view: %q", expected, view)
+		}
+	}
+	if !strings.Contains(view, "Source") || !strings.Contains(view, "Target") {
+		t.Fatalf("expected underlying panes to remain visible with modal overlay, got: %q", view)
+	}
+}
+
+func TestOverlayLineAtKeepsContentOutsideModalRect(t *testing.T) {
+	base := "LLLLLLLLLLRRRRRRRRRR"
+	overlay := "MMMM"
+	got := overlayLineAt(base, overlay, 8, 4)
+	want := "LLLLLLLLMMMMRRRRRRRR"
+	if got != want {
+		t.Fatalf("overlayLineAt mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestOverlayLineAtKeepsXAlignmentWithANSIOverlay(t *testing.T) {
+	base := "AAAAAAAAAABBBBBBBBBB"
+	overlay := "\x1b[31mMMMM\x1b[0m"
+	got := overlayLineAt(base, overlay, 5, 4)
+	if stripped := ansi.Strip(got); stripped != "AAAAAMMMMABBBBBBBBBB" {
+		t.Fatalf("overlayLineAt ansi mismatch: got %q", stripped)
 	}
 }
 

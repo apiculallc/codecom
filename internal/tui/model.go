@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	mv "codecom/internal/move"
 	"codecom/internal/search"
@@ -232,7 +233,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateFilter(msg)
 		}
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			if m.searchActive() {
+				m.clearSearch("search cleared")
+				return m, nil
+			}
 			return m, tea.Quit
 		case "ctrl+f":
 			m.enterSearchMode()
@@ -360,6 +367,9 @@ func (m Model) View() string {
 	main := m.renderMainView()
 	if m.moveConfirmOpen {
 		return m.renderMoveConfirmation(main)
+	}
+	if m.searchMode {
+		return m.renderSearchModal(main)
 	}
 	if !m.popupOpen {
 		return main
@@ -559,6 +569,10 @@ func (m Model) renderPane(title string, width, height int, lines []string, pane 
 		frame = m.styles.activePane
 		titleStyle = m.styles.activeTitle
 	}
+	title = m.decoratePaneTitle(title)
+	if m.searchMode || m.searchActive() {
+		titleStyle = m.styles.searchTitle
+	}
 
 	innerWidth := max(1, width-frame.GetHorizontalFrameSize())
 	innerHeight := max(1, height-frame.GetVerticalFrameSize())
@@ -595,6 +609,17 @@ func (m Model) renderPane(title string, width, height int, lines []string, pane 
 	content := strings.Join(rows, "\n")
 	frame = frame.Width(innerWidth).Height(innerHeight)
 	return frame.Render(lipgloss.JoinVertical(lipgloss.Left, titleLine, content))
+}
+
+func (m Model) decoratePaneTitle(title string) string {
+	if !(m.searchMode || m.searchActive()) {
+		return title
+	}
+	query := strings.TrimSpace(m.searchQuery)
+	if query == "" {
+		return title + " | Search"
+	}
+	return fmt.Sprintf("%s | Search: %s", title, truncateRight(query, 24))
 }
 
 func (m Model) dimensions() (int, int) {
@@ -903,6 +928,67 @@ func (m Model) renderMoveConfirmation(_ string) string {
 	)
 	box := frame.Render(body)
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m Model) renderSearchModal(main string) string {
+	w, h := m.dimensions()
+	boxW := min(max(44, w-14), 84)
+	frame := m.styles.activePane.
+		Width(max(1, boxW-m.styles.activePane.GetHorizontalFrameSize())).
+		Height(max(1, 6-m.styles.activePane.GetVerticalFrameSize()))
+	body := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.styles.searchTitle.Render(" Search "),
+		padRight(truncateRight("Query: "+m.searchQuery+"_", max(10, boxW-8)), max(10, boxW-8)),
+		"Enter submit, Esc clear",
+	)
+	box := frame.Render(body)
+	mainLines := strings.Split(main, "\n")
+	boxLines := strings.Split(box, "\n")
+	if len(mainLines) == 0 || len(boxLines) == 0 {
+		return main
+	}
+	boxH := len(boxLines)
+	boxRenderW := 0
+	for _, line := range boxLines {
+		boxRenderW = max(boxRenderW, ansi.StringWidth(line))
+	}
+	x := (w - boxRenderW) / 2
+	y := (h - boxH) / 2
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	for i := 0; i < boxH && y+i < len(mainLines); i++ {
+		mainLines[y+i] = overlayLineAt(mainLines[y+i], boxLines[i], x, boxRenderW)
+	}
+	return strings.Join(mainLines, "\n")
+}
+
+func overlayLineAt(base, overlay string, x, width int) string {
+	if x < 0 {
+		x = 0
+	}
+	if width < 0 {
+		width = 0
+	}
+	baseW := ansi.StringWidth(base)
+	if baseW < x {
+		base += strings.Repeat(" ", x-baseW)
+		baseW = x
+	}
+	prefix := ansi.Cut(base, 0, x)
+	suffix := ""
+	if baseW > x+width {
+		suffix = ansi.Cut(base, x+width, baseW)
+	}
+	overlay = ansi.Truncate(overlay, width, "")
+	if ow := ansi.StringWidth(overlay); ow < width {
+		overlay += strings.Repeat(" ", width-ow)
+	}
+	return prefix + overlay + suffix
 }
 
 func (m *Model) refreshFromDisk() {
@@ -1280,13 +1366,7 @@ func (m Model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.setSearchQuery("")
-		m.searchMode = false
-		m.searchSessionSet = make(map[string]struct{})
-		m.searchFolderSet = make(map[string]struct{})
-		m.searchOffsets = make(map[string][]int64)
-		m.clampAll()
-		m.status = "search cleared"
+		m.clearSearch("search cleared")
 		return m, nil
 	case "enter":
 		m.searchMode = false
@@ -1314,6 +1394,16 @@ func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+func (m *Model) clearSearch(status string) {
+	m.setSearchQuery("")
+	m.searchMode = false
+	m.searchSessionSet = make(map[string]struct{})
+	m.searchFolderSet = make(map[string]struct{})
+	m.searchOffsets = make(map[string][]int64)
+	m.clampAll()
+	m.status = status
 }
 
 func (m Model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1814,6 +1904,7 @@ type styles struct {
 	activePane        lipgloss.Style
 	inactivePane      lipgloss.Style
 	activeTitle       lipgloss.Style
+	searchTitle       lipgloss.Style
 	inactiveTitle     lipgloss.Style
 	row               lipgloss.Style
 	popupUserRow      lipgloss.Style
@@ -1852,6 +1943,7 @@ func newStyles() styles {
 		activePane:        activePane,
 		inactivePane:      inactivePane,
 		activeTitle:       lipgloss.NewStyle().Background(p.accent).Foreground(p.selectFG).Bold(true),
+		searchTitle:       lipgloss.NewStyle().Background(p.selectBG).Foreground(p.selectFG).Bold(true),
 		inactiveTitle:     lipgloss.NewStyle().Background(p.chromeBG).Foreground(p.text).Bold(true),
 		row:               lipgloss.NewStyle().Background(p.paneBG).Foreground(p.text),
 		popupUserRow:      lipgloss.NewStyle().Background(lipgloss.Color("18")).Foreground(p.text),
