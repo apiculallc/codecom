@@ -1,6 +1,7 @@
 package sessionindex
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -22,6 +23,17 @@ func Scan(codexRoot string) (ScanResult, error) {
 	}
 
 	for _, file := range files {
+		info, err := os.Lstat(file)
+		if err != nil {
+			return ScanResult{}, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			res.Warnings = append(res.Warnings, Warning{
+				SessionFile: file,
+				Message:     "skipping symlinked session file",
+			})
+			continue
+		}
 		rec, warnings, err := parseSessionFile(file)
 		if err != nil {
 			return ScanResult{}, err

@@ -3,11 +3,13 @@ package search
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 )
+
+const maxConversationLineBytes = 16 * 1024 * 1024
 
 type messageLine struct {
 	Offset int64
@@ -43,22 +45,21 @@ func parseConversationMessages(path string) ([]messageLine, error) {
 	}
 	defer f.Close()
 
-	reader := bufio.NewReader(f)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxConversationLineBytes)
 	out := make([]messageLine, 0, 128)
 	var offset int64
-	for {
-		raw, err := reader.ReadBytes('\n')
-		if len(raw) > 0 {
-			if txt, ok := parseConversationLine(raw); ok {
-				out = append(out, messageLine{Offset: offset, Text: txt})
-			}
-			offset += int64(len(raw))
+	for scanner.Scan() {
+		raw := scanner.Bytes()
+		if txt, ok := parseConversationLine(raw); ok {
+			out = append(out, messageLine{Offset: offset, Text: txt})
 		}
-		if err == nil {
-			continue
-		}
-		if err == io.EOF {
-			break
+		offset += int64(len(raw) + 1)
+	}
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			// Oversized records are ignored to avoid unbounded allocations.
+			return out, nil
 		}
 		return nil, fmt.Errorf("read session file: %w", err)
 	}

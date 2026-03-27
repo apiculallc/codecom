@@ -46,11 +46,11 @@ func Ensure(codexDir string) (Config, error) {
 		return Config{}, err
 	}
 
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+	if err := os.MkdirAll(codexDir, 0o700); err != nil {
 		return Config{}, err
 	}
 	cfg := Default()
-	if err := os.WriteFile(cfgPath, []byte(serialize(cfg)), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(serialize(cfg)), 0o600); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

@@ -33,3 +33,29 @@ func TestScanFindsSessionFilesAndSorts(t *testing.T) {
 		t.Fatalf("expected newest date first for same cwd, got %s", got)
 	}
 }
+
+func TestScanSkipsSymlinkedSessionFiles(t *testing.T) {
+	root := t.TempDir()
+	realFile := filepath.Join(root, "real.jsonl")
+	if err := os.WriteFile(realFile, []byte("{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/scan-1\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(root, "sessions", "2026", "02", "22", "link.jsonl")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realFile, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Scan(root)
+	if err != nil {
+		t.Fatalf("scan error: %v", err)
+	}
+	if len(res.Sessions) != 0 {
+		t.Fatalf("expected symlinked session file to be ignored, got %d sessions", len(res.Sessions))
+	}
+	if len(res.Warnings) == 0 {
+		t.Fatal("expected warning for skipped symlink")
+	}
+}

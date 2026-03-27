@@ -69,6 +69,46 @@ func TestBuildSQLiteIndexAndSearch(t *testing.T) {
 	if len(res3.SessionIDs) != 0 || len(res3.FolderPaths) != 0 || len(res3.OffsetsBySessionID) != 0 {
 		t.Fatalf("expected empty result, got %#v", res3)
 	}
+
+	indexDir := filepath.Join(tmp, ".codecom", "search")
+	dirInfo, err := os.Stat(indexDir)
+	if err != nil {
+		t.Fatalf("stat index dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("unexpected index dir mode: got %o want 700", got)
+	}
+
+	indexPath := filepath.Join(indexDir, "index-v1.sqlite")
+	fileInfo, err := os.Stat(indexPath)
+	if err != nil {
+		t.Fatalf("stat index file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("unexpected index file mode: got %o want 600", got)
+	}
+}
+
+func TestBuildSQLiteIndexRejectsSymlinkIndexFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	indexDir := filepath.Join(tmp, ".codecom", "search")
+	if err := os.MkdirAll(indexDir, 0o755); err != nil {
+		t.Fatalf("mkdir index dir: %v", err)
+	}
+	target := filepath.Join(tmp, "target.sqlite")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	indexPath := filepath.Join(indexDir, "index-v1.sqlite")
+	if err := os.Symlink(target, indexPath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	_, err := BuildSQLiteIndex("/unused", nil)
+	if err == nil {
+		t.Fatal("expected error for symlink index file")
+	}
 }
 
 func mustWriteJSONL(t *testing.T, path string, lines []string) {

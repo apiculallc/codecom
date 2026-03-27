@@ -7,7 +7,8 @@ import (
 )
 
 func TestEnsureCreatesDefaultConfigOnFirstRun(t *testing.T) {
-	root := t.TempDir()
+	parent := t.TempDir()
+	root := filepath.Join(parent, ".codex")
 	cfg, err := Ensure(root)
 	if err != nil {
 		t.Fatalf("Ensure error: %v", err)
@@ -17,6 +18,20 @@ func TestEnsureCreatesDefaultConfigOnFirstRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, FileName)); err != nil {
 		t.Fatalf("expected config file to be created: %v", err)
+	}
+	dirInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat root: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("unexpected config dir mode: got %o want 700", got)
+	}
+	fileInfo, err := os.Stat(filepath.Join(root, FileName))
+	if err != nil {
+		t.Fatalf("stat config file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("unexpected config file mode: got %o want 600", got)
 	}
 }
 

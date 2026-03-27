@@ -22,14 +22,25 @@ func ExecutePlan(codexRoot string, plan Plan) (ExecuteResult, error) {
 		return ExecuteResult{}, fmt.Errorf("sqlite preflight: %w", err)
 	}
 
-	snap, err := gitops.SnapshotIfDirty(codexRoot)
+	sqliteFile := filepath.Join(codexRoot, "state_5.sqlite")
+	snapshotPaths := make([]string, 0, len(plan.Items)+1)
+	snapshotPaths = append(snapshotPaths, sqliteFile)
+	seen := make(map[string]struct{}, len(plan.Items))
+	for _, item := range plan.Items {
+		if _, ok := seen[item.SessionFile]; ok {
+			continue
+		}
+		seen[item.SessionFile] = struct{}{}
+		snapshotPaths = append(snapshotPaths, item.SessionFile)
+	}
+
+	snap, err := gitops.SnapshotIfDirty(codexRoot, snapshotPaths)
 	if err != nil {
 		return ExecuteResult{}, fmt.Errorf("git preflight snapshot: %w", err)
 	}
 
 	var commits int
 	handled := make(map[string]struct{}, len(plan.Items))
-	sqliteFile := filepath.Join(codexRoot, "state_5.sqlite")
 	for _, item := range plan.Items {
 		if _, ok := handled[item.SessionFile]; ok {
 			continue

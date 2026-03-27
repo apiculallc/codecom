@@ -99,12 +99,12 @@ func TestExecutePlanCreatesSnapshotWhenDirty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExecutePlan error: %v", err)
 	}
-	if !got.SnapshotCommitted {
-		t.Fatal("expected dirty snapshot commit")
+	if got.SnapshotCommitted {
+		t.Fatal("expected no snapshot for unrelated dirty change")
 	}
-	second := strings.TrimSpace(runGit(t, repo, "log", "-2", "--pretty=%s"))
-	if !strings.Contains(second, "codecom: snapshot pre-existing local changes") {
-		t.Fatalf("expected snapshot commit in last two messages, got %q", second)
+	status := runGit(t, repo, "status", "--short", "--", "dirty.txt")
+	if !strings.Contains(status, "dirty.txt") {
+		t.Fatalf("expected unrelated dirty file to remain untouched, got %q", status)
 	}
 }
 

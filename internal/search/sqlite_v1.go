@@ -28,8 +28,12 @@ func buildSQLiteIndex(_ string, sessions []sessionindex.SessionRecord) (Backend,
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(indexPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create index directory: %w", err)
+	indexDir := filepath.Dir(indexPath)
+	if err := ensurePrivateDir(indexDir); err != nil {
+		return nil, err
+	}
+	if err := ensureRegularPath(indexPath); err != nil {
+		return nil, err
 	}
 
 	db, err := sql.Open("sqlite", indexPath)
@@ -46,6 +50,10 @@ func buildSQLiteIndex(_ string, sessions []sessionindex.SessionRecord) (Backend,
 		_ = db.Close()
 		return nil, err
 	}
+	if err := os.Chmod(indexPath, 0o600); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("chmod sqlite index: %w", err)
+	}
 	return backend, nil
 }
 
@@ -55,6 +63,47 @@ func defaultIndexPath() (string, error) {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
 	return filepath.Join(home, v1IndexRelativePath), nil
+}
+
+func ensurePrivateDir(path string) error {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("index directory is symlink: %s", path)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("index directory is not a directory: %s", path)
+		}
+		if err := os.Chmod(path, 0o700); err != nil {
+			return fmt.Errorf("chmod index directory: %w", err)
+		}
+		return nil
+	case os.IsNotExist(err):
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return fmt.Errorf("create index directory: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("stat index directory: %w", err)
+	}
+}
+
+func ensureRegularPath(path string) error {
+	info, err := os.Lstat(path)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("index file is symlink: %s", path)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("index file is a directory: %s", path)
+		}
+		return nil
+	}
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("stat index path: %w", err)
 }
 
 func (b *sqliteBackend) Close() error {

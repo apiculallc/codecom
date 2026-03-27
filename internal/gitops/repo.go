@@ -2,6 +2,8 @@ package gitops
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,18 +36,32 @@ func IsDirty(repoRoot string) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-func SnapshotIfDirty(repoRoot string) (bool, error) {
-	dirty, err := IsDirty(repoRoot)
+func SnapshotIfDirty(repoRoot string, paths []string) (bool, error) {
+	dirty, err := hasWorkingTreeDiff(repoRoot, paths)
 	if err != nil {
 		return false, err
 	}
 	if !dirty {
 		return false, nil
 	}
-	if _, err := runGit(repoRoot, "add", "-A"); err != nil {
+	pathspec, err := relPathspec(repoRoot, paths)
+	if err != nil {
 		return false, err
 	}
-	if _, err := runGit(repoRoot, "commit", "-m", snapshotMessage); err != nil {
+	args := append([]string{"add", "--"}, pathspec...)
+	if _, err := runGit(repoRoot, args...); err != nil {
+		return false, err
+	}
+	changed, err := hasCachedDiff(repoRoot, pathspec)
+	if err != nil {
+		return false, err
+	}
+	if !changed {
+		return false, nil
+	}
+	commitArgs := []string{"commit", "-m", snapshotMessage, "--"}
+	commitArgs = append(commitArgs, pathspec...)
+	if _, err := runGit(repoRoot, commitArgs...); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -70,7 +86,7 @@ func CommitMove(repoRoot string, in MoveCommitInput) (bool, error) {
 		return false, err
 	}
 
-	stagedDiff, err := hasCachedDiff(repoRoot)
+	stagedDiff, err := hasCachedDiff(repoRoot, paths)
 	if err != nil {
 		return false, err
 	}
@@ -80,11 +96,11 @@ func CommitMove(repoRoot string, in MoveCommitInput) (bool, error) {
 
 	bodyData, err := json.Marshal(map[string]any{
 		"session_id":     in.SessionID,
-		"session_file":   in.SessionFile,
-		"source_root":    in.SourceRoot,
-		"target_root":    in.TargetRoot,
-		"old_cwd":        in.OldCWD,
-		"new_cwd":        in.NewCWD,
+		"session_file":   redactPath(in.SessionFile, repoRoot),
+		"source_root":    redactPath(in.SourceRoot, repoRoot),
+		"target_root":    redactPath(in.TargetRoot, repoRoot),
+		"old_cwd":        redactPath(in.OldCWD, repoRoot),
+		"new_cwd":        redactPath(in.NewCWD, repoRoot),
 		"sqlite_updated": in.SQLiteUpdated,
 	})
 	if err != nil {
@@ -92,14 +108,18 @@ func CommitMove(repoRoot string, in MoveCommitInput) (bool, error) {
 	}
 
 	subject := fmt.Sprintf("codecom: cwd-change %s", in.SessionID)
-	if _, err := runGit(repoRoot, "commit", "-m", subject, "-m", string(bodyData), "-m", moveTrailer); err != nil {
+	commitArgs := []string{"commit", "-m", subject, "-m", string(bodyData), "-m", moveTrailer, "--"}
+	commitArgs = append(commitArgs, paths...)
+	if _, err := runGit(repoRoot, commitArgs...); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func hasCachedDiff(repoRoot string) (bool, error) {
-	cmd := exec.Command("git", "-C", repoRoot, "diff", "--cached", "--quiet", "--")
+func hasCachedDiff(repoRoot string, paths []string) (bool, error) {
+	args := []string{"-C", repoRoot, "diff", "--cached", "--quiet", "--"}
+	args = append(args, paths...)
+	cmd := exec.Command("git", args...)
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -108,6 +128,52 @@ func hasCachedDiff(repoRoot string) (bool, error) {
 		return false, fmt.Errorf("git diff --cached --quiet --: %w", err)
 	}
 	return false, nil
+}
+
+func hasWorkingTreeDiff(repoRoot string, paths []string) (bool, error) {
+	cmd := exec.Command("git", append([]string{"-C", repoRoot, "diff", "--quiet", "--"}, paths...)...)
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("git diff --quiet -- %s: %w", strings.Join(paths, " "), err)
+	}
+
+	cmd = exec.Command("git", append([]string{"-C", repoRoot, "diff", "--cached", "--quiet", "--"}, paths...)...)
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("git diff --cached --quiet -- %s: %w", strings.Join(paths, " "), err)
+	}
+	return false, nil
+}
+
+func relPathspec(repoRoot string, paths []string) ([]string, error) {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		rel, err := filepath.Rel(repoRoot, p)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return nil, fmt.Errorf("path outside repo root: %q", p)
+		}
+		out = append(out, rel)
+	}
+	return out, nil
+}
+
+func redactPath(path, repoRoot string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(repoRoot, path)
+	if err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		return "./" + filepath.ToSlash(rel)
+	}
+	sum := sha256.Sum256([]byte(path))
+	return "sha256:" + hex.EncodeToString(sum[:8])
 }
 
 func runGit(repoRoot string, args ...string) (string, error) {

@@ -60,7 +60,7 @@ Design an open-source, terminal-first Go app (`codecom`) to manage Codex session
 - Move commits:
   - one commit per changed session file
   - include machine-readable JSON in commit message body
-  - transparent absolute paths allowed
+  - redact absolute paths by default
 - Undo:
   - `undo last move` required
   - only undo most recent codecom cwd-change commit
@@ -142,4 +142,3 @@ Design an open-source, terminal-first Go app (`codecom`) to manage Codex session
 - `docs/architecture.md`
 - `AGENTS.md`
 - `context.md` (this file)
-

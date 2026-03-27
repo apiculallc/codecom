@@ -20,7 +20,7 @@ func TestSnapshotIfDirtyCreatesCommit(t *testing.T) {
 	if err := os.WriteFile(file, []byte("2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	committed, err := SnapshotIfDirty(repo)
+	committed, err := SnapshotIfDirty(repo, []string{file})
 	if err != nil {
 		t.Fatalf("SnapshotIfDirty error: %v", err)
 	}
@@ -30,6 +30,32 @@ func TestSnapshotIfDirtyCreatesCommit(t *testing.T) {
 	msg := strings.TrimSpace(runGitCmd(t, repo, "log", "-1", "--pretty=%s"))
 	if msg != snapshotMessage {
 		t.Fatalf("unexpected snapshot commit message: %q", msg)
+	}
+}
+
+func TestSnapshotIfDirtyIgnoresUnrelatedPaths(t *testing.T) {
+	repo := initGitRepo(t)
+	file := filepath.Join(repo, "a.txt")
+	other := filepath.Join(repo, "other.txt")
+	if err := os.WriteFile(file, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, repo, "add", "a.txt", "other.txt")
+	runGitCmd(t, repo, "commit", "-m", "init")
+
+	if err := os.WriteFile(other, []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	committed, err := SnapshotIfDirty(repo, []string{file})
+	if err != nil {
+		t.Fatalf("SnapshotIfDirty error: %v", err)
+	}
+	if committed {
+		t.Fatal("expected no snapshot commit for unrelated dirty paths")
 	}
 }
 
@@ -79,6 +105,66 @@ func TestCommitMoveCreatesTaggedCommit(t *testing.T) {
 	}
 	if !strings.Contains(body, "\"session_id\":\"sid-1\"") {
 		t.Fatalf("expected json body in commit message: %q", body)
+	}
+	if strings.Contains(body, "/old") || strings.Contains(body, "/new") {
+		t.Fatalf("expected redacted paths in commit message: %q", body)
+	}
+	if !strings.Contains(body, "\"session_file\":\"./sessions/2026/03/17/s1.jsonl\"") {
+		t.Fatalf("expected relative session file path in commit body: %q", body)
+	}
+}
+
+func TestCommitMoveSkipsUnrelatedStagedChanges(t *testing.T) {
+	repo := initGitRepo(t)
+	sessionFile := filepath.Join(repo, "sessions", "2026", "03", "17", "s1.jsonl")
+	sqliteFile := filepath.Join(repo, "state_5.sqlite")
+	unrelated := filepath.Join(repo, "unrelated.txt")
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionFile, []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sqliteFile, []byte("sqlite\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unrelated, []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, repo, "add", "-A")
+	runGitCmd(t, repo, "commit", "-m", "init")
+
+	if err := os.WriteFile(sessionFile, []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sqliteFile, []byte("sqlite2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unrelated, []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, repo, "add", "unrelated.txt")
+
+	committed, err := CommitMove(repo, MoveCommitInput{
+		SessionID:     "sid-1",
+		SessionFile:   sessionFile,
+		SQLiteFile:    sqliteFile,
+		SourceRoot:    "/old",
+		TargetRoot:    "/new",
+		OldCWD:        "/old/repo",
+		NewCWD:        "/new/repo",
+		SQLiteUpdated: true,
+	})
+	if err != nil {
+		t.Fatalf("CommitMove error: %v", err)
+	}
+	if !committed {
+		t.Fatal("expected move commit")
+	}
+
+	files := strings.TrimSpace(runGitCmd(t, repo, "show", "--name-only", "--pretty=format:", "HEAD"))
+	if strings.Contains(files, "unrelated.txt") {
+		t.Fatalf("move commit must not include unrelated staged file, got files:\n%s", files)
 	}
 }
 
