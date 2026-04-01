@@ -99,6 +99,7 @@ type Model struct {
 	styles          styles
 }
 
+// NewModel is deprecated for new call sites. Prefer NewModelWithTargetRoot.
 func NewModel(records []sessionindex.SessionRecord) Model {
 	return NewModelWithTargetRoot(records, detectTargetRoot())
 }
