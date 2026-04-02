@@ -4,7 +4,7 @@ Safe, terminal-first management for local Codex sessions when your repos move an
 
 ## Demo
 
-![codecom demo](demos/codecom.gif)
+![codecom demo](demos/codecom.opt.gif)
 
 ## Why This Exists
 
