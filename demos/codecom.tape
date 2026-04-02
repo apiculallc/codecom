@@ -12,49 +12,49 @@ Type "codecom tui --codex-dir .demo/codex --target-root .demo/home/target"
 Enter
 Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Tab
-Sleep 300ms
+Sleep 1s
 Space
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Space
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Space
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Space
-Sleep 300ms
+Sleep 1s
 Tab
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 Right
-Sleep 300ms
+Sleep 1s
 Down
-Sleep 300ms
+Sleep 1s
 F6
 Sleep 3s
 Enter
-Sleep 300ms
+Sleep 1s
 F5
-Sleep 300ms
+Sleep 1s
 Ctrl+F
 Sleep 1s
 Type orphan
@@ -76,7 +76,7 @@ Sleep 1s
 Down
 Sleep 1s
 F6
-Sleep 1s
+Sleep 3s
 Enter
 Sleep 1s
 Escape
@@ -98,10 +98,10 @@ Sleep 1s
 Space
 Sleep 1s
 F6
-Sleep 1s
+Sleep 3s
 Enter
 Sleep 1s
 F5
-Sleep 1s
+Sleep 2s
 Type q
 Sleep 1s
