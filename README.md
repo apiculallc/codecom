@@ -2,6 +2,10 @@
 
 Safe, terminal-first management for local Codex sessions when your repos move and your `cwd` history does not.
 
+## Demo
+
+![codecom demo](demos/codecom.gif)
+
 ## Why This Exists
 
 If you rename a repo, move directories, or consolidate projects into a monorepo, old Codex sessions can become awkward to discover and harder to trust.  
